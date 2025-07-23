@@ -1,4 +1,4 @@
-module github.com/fluxodesign/cachekv
+module cachekv
 
 go 1.24.4
 

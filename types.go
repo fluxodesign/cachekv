@@ -1,4 +1,4 @@
-package main
+package cachekv
 
 import "github.com/dgraph-io/badger/v4"
 

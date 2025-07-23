@@ -1,4 +1,4 @@
-package main
+package cachekv
 
 import (
 	"github.com/google/uuid"
@@ -113,7 +113,7 @@ func TestCopyMetas(t *testing.T) {
 	for i := 0; i < n; i++ {
 		found := true
 		for found == true {
-			newKey := uuid.New().String()
+			newKey := uuid.NewString()
 			_, found = values[newKey]
 			if !found {
 				rv, _ := randomValues(keyLength)
