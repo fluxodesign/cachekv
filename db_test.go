@@ -17,6 +17,7 @@ const alternateTestStorePath = "./test-alternate/"
 
 func setup() func() {
 	storePath = "./test-store/"
+	keyring.MockInit()
 	err := initMetaDb()
 	if err != nil {
 		log.Println("Failed to init meta db")
@@ -43,6 +44,7 @@ func setup() func() {
 }
 
 func TestRandomValues(t *testing.T) {
+	defer setup()()
 	value, err := randomValues(32)
 	assert.Nil(t, err)
 	assert.Equal(t, 32, len(value))
@@ -168,7 +170,7 @@ func TestDefaultConfig(t *testing.T) {
 	defer setup()()
 	cfg, err := ListConfigurations()
 	assert.Nil(t, err)
-	assert.False(t, cfg.SecureNewDb)
+	assert.True(t, cfg.SecureNewDb)
 	assert.Equal(t, storePath, cfg.StorePath)
 	assert.Equal(t, storePath, cfg.MetaStore)
 	assert.Equal(t, metaStorage.file, cfg.MetaFile)
@@ -178,7 +180,7 @@ func TestUpdateConfigurations(t *testing.T) {
 	defer setup()()
 	cfg, err := ListConfigurations()
 	assert.Nil(t, err)
-	assert.False(t, cfg.SecureNewDb)
+	assert.True(t, cfg.SecureNewDb)
 	assert.Equal(t, storePath, cfg.StorePath)
 	assert.Equal(t, storePath, cfg.MetaStore)
 	assert.Equal(t, metaStorage.file, cfg.MetaFile)
@@ -186,7 +188,7 @@ func TestUpdateConfigurations(t *testing.T) {
 	newStorePath := "/var/tmp/blah"
 	newMetaFile := "blah-blah.meta"
 	newMetaStore := "blah-blah.store"
-	cfg.SecureNewDb = true
+	cfg.SecureNewDb = false
 	cfg.StorePath = newStorePath
 	cfg.MetaStore = newMetaStore
 	cfg.MetaFile = newMetaFile
@@ -194,7 +196,7 @@ func TestUpdateConfigurations(t *testing.T) {
 	assert.Nil(t, err)
 	cfg2, err := ListConfigurations()
 	assert.Nil(t, err)
-	assert.Equal(t, true, cfg2.SecureNewDb)
+	assert.Equal(t, false, cfg2.SecureNewDb)
 	assert.Equal(t, newStorePath, cfg2.StorePath)
 	assert.Equal(t, newMetaFile, cfg2.MetaFile)
 	assert.Equal(t, newMetaStore, cfg2.MetaStore)
@@ -211,7 +213,6 @@ func TestKeyring(t *testing.T) {
 
 func TestCreateAndListDatabases(t *testing.T) {
 	defer setup()()
-	keyring.MockInit()
 	testdb1 := "testdb1"
 	testdb2 := "testdb2"
 	// change config store
@@ -270,7 +271,6 @@ func TestBase64DecodeEncode(t *testing.T) {
 
 func TestInsertAndGetEntry(t *testing.T) {
 	defer setup()()
-	keyring.MockInit()
 	testDb1 := "testdb1"
 	dataKey := "dataKey"
 	dataValue, err := randomValues(256)
@@ -294,7 +294,6 @@ func TestInsertAndGetEntry(t *testing.T) {
 
 func TestInsertAndUpdateEntry(t *testing.T) {
 	defer setup()()
-	keyring.MockInit()
 	testDb1 := "testdb1"
 	dataKey := "dataKey"
 	dataValue, err := randomValues(256)
@@ -325,7 +324,6 @@ func TestInsertAndUpdateEntry(t *testing.T) {
 
 func TestDeleteEntry(t *testing.T) {
 	defer setup()()
-	keyring.MockInit()
 	testDb1 := "testdb1"
 	dataKey := "dataKey"
 	dataValue, err := randomValues(256)
@@ -353,7 +351,6 @@ func TestDeleteEntry(t *testing.T) {
 
 func TestInsertBatch(t *testing.T) {
 	defer setup()()
-	keyring.MockInit()
 	testDb1 := "testdb1"
 	cfg, err := ListConfigurations()
 	assert.Nil(t, err)
@@ -410,7 +407,6 @@ func TestInsertBatch(t *testing.T) {
 
 func TestGetEntryWithinALotOfEntries(t *testing.T) {
 	defer setup()()
-	keyring.MockInit()
 	testDb1 := "testdb1"
 	cfg, err := ListConfigurations()
 	assert.Nil(t, err)
@@ -460,4 +456,9 @@ func TestGetEntryWithinALotOfEntries(t *testing.T) {
 	assert.Equal(t, value, entry)
 	getEntryDuration := end.Sub(start)
 	log.Printf("GetEntry() finished in %d milliseconds\n", int(getEntryDuration.Milliseconds()))
+}
+
+func TestInitReloadingExistingMetafile(t *testing.T) {
+	defer setup()()
+	assert.Nil(t, openMetaDb())
 }

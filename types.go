@@ -45,6 +45,7 @@ const (
 	EventTypeConfigChange
 	_
 
+	prefixMetaKey    = "metakey:fxstorage"
 	prefixMetaDb     = "fxstorage_db:"
 	prefixMetaEvent  = "fxstorage_event:"
 	prefixMetaConfig = "fxstorage_config"

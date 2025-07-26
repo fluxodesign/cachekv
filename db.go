@@ -17,6 +17,8 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"strings"
+	"testing"
 	"time"
 )
 
@@ -34,6 +36,9 @@ const (
 )
 
 func init() {
+	if testing.Testing() {
+		return
+	}
 	_, err := os.Stat(storePath)
 	if err != nil && os.IsNotExist(err) {
 		err = os.MkdirAll(storePath, 0640)
@@ -48,13 +53,18 @@ func init() {
 		}
 	} else {
 		// load up the saved metafile
+		err = openMetaDb()
+		if err != nil {
+			log.Fatal("error opening meta db: ", err)
+			return
+		}
 	}
 }
 
 func defaultConfig() *Config {
 	return &Config{
 		StorePath:   storePath,
-		SecureNewDb: false,
+		SecureNewDb: true,
 		MetaStore:   storePath,
 		MetaFile:    metaStorage.file,
 	}
@@ -205,11 +215,15 @@ func initMetaDb() error {
 		return fErr
 	}
 	metaStorage.path = storePath
-	metaStorage.file = string(fileKey)
+	metaStorage.file = "meta-" + string(fileKey)
 	metaStorage.key, fErr = randomValues(keyLength)
 	if fErr != nil {
 		log.Println("Error generating random values:", fErr)
 		return fErr
+	}
+	fErr = writeToKeyring(prefixMetaKey, metaStorage.key)
+	if fErr != nil {
+		log.Println("Error saving key file to keyring:", fErr)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	var err error
@@ -225,6 +239,43 @@ func initMetaDb() error {
 	err = writeMetaConfig(fxConfig)
 
 	return err
+}
+
+func openMetaDb() error {
+	var latestMetaName string
+	var latestMetaTimestamp int64 = 0
+	entries, err := os.ReadDir(storePath)
+	if err != nil {
+		log.Println("error reading store dir: ", err)
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "meta-") {
+			fInfo, e := entry.Info()
+			if e != nil {
+				log.Println("error reading file info: ", e)
+				continue
+			}
+			fileTstamp := fInfo.ModTime().UnixMilli()
+			if fileTstamp > latestMetaTimestamp {
+				latestMetaTimestamp = fileTstamp
+				latestMetaName = entry.Name()
+			}
+		}
+	}
+	if latestMetaTimestamp > 0 {
+		metaStorage.path = storePath
+		metaStorage.file = latestMetaName
+		key, e := getFromKeyring(prefixMetaKey)
+		if e != nil {
+			log.Println("error reading keyring for meta key: ", err)
+			return err
+		}
+		metaStorage.key = key
+		return nil
+	}
+
+	return errors.New("failed to open meta db")
 }
 
 func openUnsecuredDb(path string) (*badger.DB, error) {
