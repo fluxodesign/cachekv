@@ -18,6 +18,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -31,6 +32,7 @@ var (
 
 const (
 	keyLength    = 32
+	fileKey      = 8
 	fileIdLength = 16
 	service      = "fxstorage"
 )
@@ -41,7 +43,8 @@ func init() {
 	}
 	_, err := os.Stat(storePath)
 	if err != nil && os.IsNotExist(err) {
-		err = os.MkdirAll(storePath, 0640)
+		syscall.Umask(0)
+		err = os.MkdirAll(storePath, 0755)
 		if err != nil {
 			log.Fatal("error creating store dir: ", err)
 			return
@@ -209,7 +212,7 @@ func checkMetaFile() bool {
 }
 
 func initMetaDb() error {
-	fileKey, fErr := randomValues(keyLength)
+	fileKey, fErr := randomValues(fileKey)
 	if fErr != nil {
 		log.Println("Error generating random values:", fErr)
 		return fErr
@@ -221,15 +224,15 @@ func initMetaDb() error {
 		log.Println("Error generating random values:", fErr)
 		return fErr
 	}
-	fErr = writeToKeyring(prefixMetaKey, metaStorage.key)
-	if fErr != nil {
-		log.Println("Error saving key file to keyring:", fErr)
-	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	var err error
 	metaStorage.db, err = openDb(metaPath, metaStorage.key)
 	if err != nil {
 		return err
+	}
+	fErr = writeToKeyring(prefixMetaKey, metaStorage.key)
+	if fErr != nil {
+		log.Println("Error saving key file to keyring:", fErr)
 	}
 	err = closeDb(metaStorage.db)
 	if err != nil {
