@@ -292,8 +292,17 @@ func openUnsecuredDb(path string) (*badger.DB, error) {
 	return db, nil
 }
 
-func openDb(path string, key []byte) (*badger.DB, error) {
-	opt := badger.DefaultOptions(path).WithEncryptionKey(key).WithEncryptionKeyRotationDuration(24 * time.Hour)
+func openDb(path string, key []byte, inMemory ...bool) (*badger.DB, error) {
+	var inMemoryOnly = false
+	var opt badger.Options
+	if len(inMemory) > 0 {
+		inMemoryOnly = inMemory[0]
+	}
+	if inMemoryOnly {
+		opt = badger.DefaultOptions("").WithEncryptionKey(key).WithEncryptionKeyRotationDuration(24 * time.Hour).WithInMemory(inMemoryOnly)
+	} else {
+		opt = badger.DefaultOptions(path).WithEncryptionKey(key).WithEncryptionKeyRotationDuration(24 * time.Hour)
+	}
 	opt.IndexCacheSize = 100 << 20
 	db, err := badger.Open(opt)
 	if err != nil {
@@ -535,7 +544,7 @@ func getDbKey(dbName string, dbObject *DbObject) ([]byte, error) {
 	return nil, nil
 }
 
-func CreateDatabase(dbName string, secure bool) error {
+func CreateDatabase(dbName string, secure bool, inMemory ...bool) error {
 	// open db with name and optional key - store the key on keyring
 	dbId, _ := randomValues(fileIdLength)
 	dbActualName := dbName + "-" + string(dbId)
@@ -547,7 +556,7 @@ func CreateDatabase(dbName string, secure bool) error {
 		if err != nil {
 			return err
 		}
-		db, err = openDb(dbPath, key)
+		db, err = openDb(dbPath, key, inMemory...)
 		if err != nil {
 			return err
 		}
