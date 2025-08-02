@@ -77,7 +77,7 @@ func TestDifferentEncryptionKeys(t *testing.T) {
 	assert.NotNil(t, value)
 	assert.Equal(t, value, []byte("testvalue"))
 	metaKey, _ := randomValues(32)
-	db, err := openDb(metaPath, metaKey)
+	db, err := OpenDatabase(metaPath, metaKey)
 	assert.NotNil(t, err)
 	assert.Nil(t, db)
 }
@@ -85,23 +85,23 @@ func TestDifferentEncryptionKeys(t *testing.T) {
 func TestCopyMetasTwoRecords(t *testing.T) {
 	defer setup()()
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	oldDb, err := openDb(metaPath, metaStorage.key)
+	oldDb, err := OpenDatabase(metaPath, metaStorage.key)
 	assert.Nil(t, setDbEntry([]byte("prefix:testkey"), []byte("testvalue"), oldDb))
 	assert.Nil(t, setDbEntry([]byte("prefix:testkey2"), []byte("testvalue2"), oldDb))
 	keys, err := countRecords("prefix:", oldDb, true)
 	assert.Nil(t, err)
 	assert.Equal(t, 2, keys)
-	err = closeDb(oldDb)
+	err = CloseDatabase(oldDb)
 	assert.Nil(t, err)
 	newPath, newKey, err := copyMetas()
 	newMetaPath := path.Join(metaStorage.path, newPath)
-	newDb, err := openDb(newMetaPath, newKey)
+	newDb, err := OpenDatabase(newMetaPath, newKey)
 	assert.Nil(t, err)
 	assert.NotNil(t, newDb)
 	keys, err = countRecords("prefix:", newDb, true)
 	assert.Nil(t, err)
 	assert.Equal(t, 2, keys)
-	err = closeDb(newDb)
+	err = CloseDatabase(newDb)
 	assert.Nil(t, err)
 }
 
@@ -130,7 +130,7 @@ func TestCopyMetas(t *testing.T) {
 	err := metaBatchInsert(&values)
 	assert.Nil(t, err)
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	oldDb, err := openDb(metaPath, metaStorage.key)
+	oldDb, err := OpenDatabase(metaPath, metaStorage.key)
 	records, err := countRecords("prefix:", oldDb, false)
 	assert.Nil(t, err)
 	assert.Equal(t, records, n)
@@ -141,7 +141,7 @@ func TestCopyMetas(t *testing.T) {
 		assert.NotNil(t, value)
 		assert.Equal(t, value, v)
 	}
-	err = closeDb(oldDb)
+	err = CloseDatabase(oldDb)
 	assert.Nil(t, err)
 	start = time.Now()
 	newPath, newKey, err := copyMetas()
@@ -149,7 +149,7 @@ func TestCopyMetas(t *testing.T) {
 	assert.Nil(t, err)
 	duration = end.Sub(start)
 	log.Printf("copyMetas() with %d records completed in %d seconds", n, int(duration.Seconds()))
-	newDb, err := openDb(storePath+newPath, newKey)
+	newDb, err := OpenDatabase(storePath+newPath, newKey)
 	assert.Nil(t, err)
 	assert.NotNil(t, newDb)
 	records, err = countRecords("prefix:", newDb, false)
@@ -162,7 +162,7 @@ func TestCopyMetas(t *testing.T) {
 		assert.NotNil(t, value)
 		assert.Equal(t, value, v)
 	}
-	err = closeDb(newDb)
+	err = CloseDatabase(newDb)
 	assert.Nil(t, err)
 }
 
@@ -204,7 +204,7 @@ func TestUpdateConfigurations(t *testing.T) {
 
 func TestKeyring(t *testing.T) {
 	keyring.MockInit()
-	err := writeToKeyring("user", []byte("pass"))
+	err := WriteToKeyring("user", []byte("pass"))
 	assert.Nil(t, err)
 	pwd, err := getFromKeyring("user")
 	assert.Nil(t, err)
@@ -390,7 +390,7 @@ func TestInsertBatch(t *testing.T) {
 	dbKey, err := getDbKey(testDb1, dbo)
 	assert.Nil(t, err)
 	dbPath := path.Join(dbo.DbPath, dbo.DbFile)
-	db, err := openDb(dbPath, dbKey)
+	db, err := OpenDatabase(dbPath, dbKey)
 	assert.Nil(t, err)
 	records, err := countRecords("", db, false)
 	assert.Nil(t, err)
@@ -401,7 +401,7 @@ func TestInsertBatch(t *testing.T) {
 		assert.NotNil(t, value)
 		assert.Equal(t, value, v)
 	}
-	err = closeDb(db)
+	err = CloseDatabase(db)
 	assert.Nil(t, err)
 }
 
