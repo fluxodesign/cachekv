@@ -64,7 +64,7 @@ func init() {
 	}
 }
 
-func defaultConfig() *Config {
+func DefaultConfig() *Config {
 	return &Config{
 		StorePath:   storePath,
 		SecureNewDb: true,
@@ -78,7 +78,7 @@ func writeMetaEntry(key string, value []byte) error {
 		return errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := openDb(metaPath, metaStorage.key)
+	db, err := OpenDatabase(metaPath, metaStorage.key)
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func getMetaEntry(key string) ([]byte, error) {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := openDb(metaPath, metaStorage.key)
+	db, err := OpenDatabase(metaPath, metaStorage.key)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func writeMetaEvent(eventType EventType, comment string) error {
 	return writeMetaEntry(key, value)
 }
 
-func writeMetaConfig(config *Config) error {
+func WriteMetaConfig(config *Config) error {
 	value, err := json.Marshal(config)
 	if err != nil {
 		return err
@@ -181,7 +181,7 @@ func getMetaDbObject(dbName string) (*DbObject, error) {
 	return dbo, err
 }
 
-func writeToKeyring(key string, value []byte) error {
+func WriteToKeyring(key string, value []byte) error {
 	err := keyring.Set(service, key, string(value))
 	return err
 }
@@ -226,20 +226,20 @@ func initMetaDb() error {
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	var err error
-	metaStorage.db, err = openDb(metaPath, metaStorage.key)
+	metaStorage.db, err = OpenDatabase(metaPath, metaStorage.key)
 	if err != nil {
 		return err
 	}
-	fErr = writeToKeyring(prefixMetaKey, metaStorage.key)
+	fErr = WriteToKeyring(prefixMetaKey, metaStorage.key)
 	if fErr != nil {
 		log.Println("Error saving key file to keyring:", fErr)
 	}
-	err = closeDb(metaStorage.db)
+	err = CloseDatabase(metaStorage.db)
 	if err != nil {
 		return err
 	}
-	fxConfig = defaultConfig()
-	err = writeMetaConfig(fxConfig)
+	fxConfig = DefaultConfig()
+	err = WriteMetaConfig(fxConfig)
 
 	return err
 }
@@ -292,7 +292,7 @@ func openUnsecuredDb(path string) (*badger.DB, error) {
 	return db, nil
 }
 
-func openDb(path string, key []byte, inMemory ...bool) (*badger.DB, error) {
+func OpenDatabase(path string, key []byte, inMemory ...bool) (*badger.DB, error) {
 	var inMemoryOnly = false
 	var opt badger.Options
 	if len(inMemory) > 0 {
@@ -312,7 +312,7 @@ func openDb(path string, key []byte, inMemory ...bool) (*badger.DB, error) {
 	return db, nil
 }
 
-func closeDb(db *badger.DB) error {
+func CloseDatabase(db *badger.DB) error {
 	return db.Close()
 }
 
@@ -357,7 +357,7 @@ func listDatabases() (map[string]*DbObject, error) {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := openDb(metaPath, metaStorage.key)
+	db, err := OpenDatabase(metaPath, metaStorage.key)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +396,7 @@ func metaBatchInsert(values *map[string][]byte) error {
 	}
 	var err error
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	metaStorage.db, err = openDb(metaPath, metaStorage.key)
+	metaStorage.db, err = OpenDatabase(metaPath, metaStorage.key)
 	if err != nil {
 		return err
 	}
@@ -460,7 +460,7 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	}
 	var e error
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	metaStorage.db, e = openDb(metaPath, metaStorage.key)
+	metaStorage.db, e = OpenDatabase(metaPath, metaStorage.key)
 	if e != nil {
 		return "", nil, e
 	}
@@ -475,7 +475,7 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	newMetaKey, _ := randomValues(keyLength)
 	metaFileRandom, _ := randomValues(10)
 	newMetaFile := "meta-" + string(metaFileRandom)
-	newDb, err := openDb(storePath+newMetaFile, newMetaKey)
+	newDb, err := OpenDatabase(storePath+newMetaFile, newMetaKey)
 	if err != nil {
 		log.Println("Error opening new meta database: ", err)
 		return "", nil, err
@@ -556,12 +556,12 @@ func CreateDatabase(dbName string, secure bool, inMemory ...bool) error {
 		if err != nil {
 			return err
 		}
-		db, err = openDb(dbPath, key, inMemory...)
+		db, err = OpenDatabase(dbPath, key, inMemory...)
 		if err != nil {
 			return err
 		}
 		b64Key := b64Encode(key)
-		err = writeToKeyring(prefixMetaDb+dbName, []byte(b64Key))
+		err = WriteToKeyring(prefixMetaDb+dbName, []byte(b64Key))
 		if err != nil {
 			return err
 		}
@@ -585,7 +585,7 @@ func CreateDatabase(dbName string, secure bool, inMemory ...bool) error {
 	if err != nil {
 		return err
 	}
-	err = closeDb(db)
+	err = CloseDatabase(db)
 	return err
 }
 
@@ -604,7 +604,7 @@ func InsertEntry(dbName string, key string, value []byte) error {
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = openDb(dbPath, dbKey)
+		db, err = OpenDatabase(dbPath, dbKey)
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 	}
@@ -615,7 +615,7 @@ func InsertEntry(dbName string, key string, value []byte) error {
 	if err != nil {
 		return err
 	}
-	err = closeDb(db)
+	err = CloseDatabase(db)
 	return err
 }
 
@@ -638,7 +638,7 @@ func RemoveEntry(dbName string, key string) error {
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = openDb(dbPath, dbKey)
+		db, err = OpenDatabase(dbPath, dbKey)
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 	}
@@ -653,7 +653,7 @@ func RemoveEntry(dbName string, key string) error {
 		return err
 	}
 
-	err = closeDb(db)
+	err = CloseDatabase(db)
 	return err
 }
 
@@ -672,7 +672,7 @@ func BatchInsert(dbName string, entries map[string][]byte) error {
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = openDb(dbPath, dbKey)
+		db, err = OpenDatabase(dbPath, dbKey)
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 	}
@@ -685,7 +685,7 @@ func BatchInsert(dbName string, entries map[string][]byte) error {
 		return err
 	}
 
-	err = closeDb(db)
+	err = CloseDatabase(db)
 	return err
 }
 
@@ -705,7 +705,7 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = openDb(dbPath, dbKey)
+		db, err = OpenDatabase(dbPath, dbKey)
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 	}
@@ -716,7 +716,7 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = closeDb(db)
+	err = CloseDatabase(db)
 	return value, err
 }
 
@@ -725,7 +725,7 @@ func ListDatabases() ([]string, error) {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := openDb(metaPath, metaStorage.key)
+	db, err := OpenDatabase(metaPath, metaStorage.key)
 	if err != nil {
 		return nil, err
 	}
@@ -756,6 +756,16 @@ func ListDatabases() ([]string, error) {
 	return dbList, err
 }
 
+func NewStorage(db *badger.DB, path string, file string, key []byte, rotating bool) *Storage {
+	return &Storage{
+		db:          db,
+		path:        path,
+		file:        file,
+		key:         key,
+		rotatingKey: rotating,
+	}
+}
+
 func ListConfigurations() (*Config, error) {
 	if metaStorage.rotatingKey {
 		return nil, errors.New(errDbRotating)
@@ -774,7 +784,7 @@ func ListConfigurations() (*Config, error) {
 }
 
 func UpdateConfigurations(config *Config) error {
-	err := writeMetaConfig(config)
+	err := WriteMetaConfig(config)
 	if err == nil {
 		fxConfig = config
 	}
