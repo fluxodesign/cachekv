@@ -16,12 +16,10 @@ import (
 const alternateTestStorePath = "./test-alternate/"
 
 func setup() func() {
-	storePath = "./test-store/"
+	StorePath = "./test-store/"
 	keyring.MockInit()
-	err := initMetaDb()
-	if err != nil {
-		log.Println("Failed to init meta db")
-	}
+	var err error
+	Startup()
 	// teardown
 	return func() {
 		metaPath := path.Join(metaStorage.path, metaStorage.file)
@@ -31,7 +29,7 @@ func setup() func() {
 			if err != nil {
 				log.Println("error removing test db file: ", err)
 			}
-			err = os.RemoveAll(storePath)
+			err = os.RemoveAll(StorePath)
 			if err != nil {
 				log.Println("error removing test store path: ", err)
 			}
@@ -149,7 +147,7 @@ func TestCopyMetas(t *testing.T) {
 	assert.Nil(t, err)
 	duration = end.Sub(start)
 	log.Printf("copyMetas() with %d records completed in %d seconds", n, int(duration.Seconds()))
-	newDb, err := OpenDatabase(storePath+newPath, newKey)
+	newDb, err := OpenDatabase(StorePath+newPath, newKey)
 	assert.Nil(t, err)
 	assert.NotNil(t, newDb)
 	records, err = countRecords("prefix:", newDb, false)
@@ -171,8 +169,8 @@ func TestDefaultConfig(t *testing.T) {
 	cfg, err := ListConfigurations()
 	assert.Nil(t, err)
 	assert.True(t, cfg.SecureNewDb)
-	assert.Equal(t, storePath, cfg.StorePath)
-	assert.Equal(t, storePath, cfg.MetaStore)
+	assert.Equal(t, StorePath, cfg.StorePath)
+	assert.Equal(t, StorePath, cfg.MetaStore)
 	assert.Equal(t, metaStorage.file, cfg.MetaFile)
 }
 
@@ -181,8 +179,8 @@ func TestUpdateConfigurations(t *testing.T) {
 	cfg, err := ListConfigurations()
 	assert.Nil(t, err)
 	assert.True(t, cfg.SecureNewDb)
-	assert.Equal(t, storePath, cfg.StorePath)
-	assert.Equal(t, storePath, cfg.MetaStore)
+	assert.Equal(t, StorePath, cfg.StorePath)
+	assert.Equal(t, StorePath, cfg.MetaStore)
 	assert.Equal(t, metaStorage.file, cfg.MetaFile)
 	// change the config
 	newStorePath := "/var/tmp/blah"
