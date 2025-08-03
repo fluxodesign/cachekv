@@ -204,6 +204,9 @@ func randomValues(length int) ([]byte, error) {
 }
 
 func checkMetaFile() bool {
+	if metaStorage.path == "" || metaStorage.file == "" {
+		return false
+	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
 		return false
