@@ -19,13 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"testing"
 	"time"
 )
 
+// meta db stores the list of databases we have, etc.
 var (
-	// meta db stores the list of databases we have, etc.
-	storePath   = "./store/"
+	StorePath   = "./store/"
 	metaStorage Storage
 	fxConfig    *Config
 )
@@ -37,14 +36,11 @@ const (
 	service      = "fxstorage"
 )
 
-func init() {
-	if testing.Testing() {
-		return
-	}
-	_, err := os.Stat(storePath)
+func Startup() {
+	_, err := os.Stat(StorePath)
 	if err != nil && os.IsNotExist(err) {
 		syscall.Umask(0)
-		err = os.MkdirAll(storePath, 0755)
+		err = os.MkdirAll(StorePath, 0755)
 		if err != nil {
 			log.Fatal("error creating store dir: ", err)
 			return
@@ -66,9 +62,9 @@ func init() {
 
 func DefaultConfig() *Config {
 	return &Config{
-		StorePath:   storePath,
+		StorePath:   StorePath,
 		SecureNewDb: true,
-		MetaStore:   storePath,
+		MetaStore:   StorePath,
 		MetaFile:    metaStorage.file,
 	}
 }
@@ -204,6 +200,9 @@ func randomValues(length int) ([]byte, error) {
 }
 
 func checkMetaFile() bool {
+	if metaStorage.path == "" || metaStorage.file == "" {
+		return false
+	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
 		return false
@@ -217,7 +216,7 @@ func initMetaDb() error {
 		log.Println("Error generating random values:", fErr)
 		return fErr
 	}
-	metaStorage.path = storePath
+	metaStorage.path = StorePath
 	metaStorage.file = "meta-" + string(fileKey)
 	metaStorage.key, fErr = randomValues(keyLength)
 	if fErr != nil {
@@ -247,7 +246,7 @@ func initMetaDb() error {
 func openMetaDb() error {
 	var latestMetaName string
 	var latestMetaTimestamp int64 = 0
-	entries, err := os.ReadDir(storePath)
+	entries, err := os.ReadDir(StorePath)
 	if err != nil {
 		log.Println("error reading store dir: ", err)
 		return err
@@ -267,7 +266,7 @@ func openMetaDb() error {
 		}
 	}
 	if latestMetaTimestamp > 0 {
-		metaStorage.path = storePath
+		metaStorage.path = StorePath
 		metaStorage.file = latestMetaName
 		key, e := getFromKeyring(prefixMetaKey)
 		if e != nil {
@@ -475,7 +474,7 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	newMetaKey, _ := randomValues(keyLength)
 	metaFileRandom, _ := randomValues(10)
 	newMetaFile := "meta-" + string(metaFileRandom)
-	newDb, err := OpenDatabase(storePath+newMetaFile, newMetaKey)
+	newDb, err := OpenDatabase(StorePath+newMetaFile, newMetaKey)
 	if err != nil {
 		log.Println("Error opening new meta database: ", err)
 		return "", nil, err
