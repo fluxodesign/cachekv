@@ -280,6 +280,46 @@ func openMetaDb() error {
 	return errors.New("failed to open meta db")
 }
 
+func GetStorageObject(dbName string) (*Storage, error) {
+	// we need to know 3 things:
+	// 1. does it have an entry in the meta storage?
+	// 2. does it have actual db folder in store path?
+	// 3. if it's secured, does it have key stored in keyring?
+	dbObject, err := getMetaDbObject(dbName)
+	if err != nil {
+		log.Println("error getting db object: ", err)
+		return nil, err
+	}
+	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+	if _, err = os.Stat(dbPath); os.IsNotExist(err) {
+		log.Println("database file not found: ", err)
+		return nil, err
+	}
+	var dbKey = make([]byte, 0)
+	var b64Decoded = make([]byte, 0)
+	if dbObject.Secure && dbObject.Active {
+		dbKey, err = getFromKeyring(prefixMetaDb + dbName)
+		if err != nil {
+			log.Println("unable to find key for db: ", err)
+			return nil, err
+		}
+		b64Decoded, err = b64Decode(string(dbKey))
+		if err != nil {
+			log.Println("unable to get db key: ", err)
+			return nil, err
+		}
+	}
+	db, err := OpenDatabase(dbPath, b64Decoded)
+	storageObject := &Storage{
+		db:          db,
+		path:        dbObject.DbPath,
+		file:        dbObject.DbFile,
+		key:         dbKey,
+		rotatingKey: false,
+	}
+	return storageObject, nil
+}
+
 func openUnsecuredDb(path string) (*badger.DB, error) {
 	opt := badger.DefaultOptions(path)
 	opt.IndexCacheSize = 100 << 20

@@ -460,3 +460,19 @@ func TestInitReloadingExistingMetafile(t *testing.T) {
 	defer setup()()
 	assert.Nil(t, openMetaDb())
 }
+
+func TestGetStorageObject(t *testing.T) {
+	defer setup()()
+	var myKey = "key1"
+	var myValue = "value1"
+	assert.Nil(t, CreateDatabase("testdb", true))
+	storageObject, err := GetStorageObject("testdb")
+	assert.Nil(t, err)
+	assert.NotNil(t, storageObject)
+	assert.Nil(t, CloseDatabase(storageObject.db))
+	// try to insert data into the database and confirm
+	assert.Nil(t, InsertEntry("testdb", myKey, []byte(myValue)))
+	byteEntry, err := GetEntry("testdb", myKey)
+	assert.Nil(t, err)
+	assert.Equal(t, myValue, string(byteEntry))
+}
