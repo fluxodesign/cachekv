@@ -7,11 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/zalando/go-keyring"
-	"google.golang.org/protobuf/proto"
 	"log"
 	"math/big"
 	"os"
@@ -20,6 +15,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/zalando/go-keyring"
+	"google.golang.org/protobuf/proto"
 )
 
 // meta db stores the list of databases we have, etc.

@@ -1,9 +1,6 @@
 package cachekv
 
 import (
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
-	"github.com/zalando/go-keyring"
 	"log"
 	"maps"
 	"math/rand"
@@ -11,6 +8,10 @@ import (
 	"path"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/zalando/go-keyring"
 )
 
 const alternateTestStorePath = "./test-alternate/"
