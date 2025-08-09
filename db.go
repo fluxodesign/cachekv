@@ -650,8 +650,16 @@ func InsertEntry(dbName string, key string, value []byte) error {
 	return err
 }
 
+func (t *Storage) InsertEntry(key string, value []byte) error {
+	return setDbEntry([]byte(key), value, t.db)
+}
+
 func UpdateEntry(dbName string, key string, value []byte) error {
 	return InsertEntry(dbName, key, value)
+}
+
+func (t *Storage) UpdateEntry(key string, value []byte) error {
+	return setDbEntry([]byte(key), value, t.db)
 }
 
 func RemoveEntry(dbName string, key string) error {
@@ -686,6 +694,12 @@ func RemoveEntry(dbName string, key string) error {
 
 	err = CloseDatabase(db)
 	return err
+}
+
+func (t *Storage) RemoveEntry(key string) error {
+	return t.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete([]byte(key))
+	})
 }
 
 func BatchInsert(dbName string, entries map[string][]byte) error {
@@ -749,6 +763,10 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	}
 	err = CloseDatabase(db)
 	return value, err
+}
+
+func (t *Storage) GetEntry(key string) ([]byte, error) {
+	return getDbEntry([]byte(key), t.db)
 }
 
 func ListDatabases() ([]string, error) {

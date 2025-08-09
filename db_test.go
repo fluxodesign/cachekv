@@ -477,3 +477,26 @@ func TestGetStorageObject(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, myValue, string(byteEntry))
 }
+
+func TestDbObjectInsertEntry(t *testing.T) {
+	defer setup()()
+	var myKey = "key1"
+	var myValue = "value1"
+	var updatedValue = "value2"
+	assert.Nil(t, CreateDatabase("testdb", true))
+	storageObject, err := GetStorageObject("testdb")
+	assert.Nil(t, err)
+	assert.NotNil(t, storageObject)
+	assert.Nil(t, storageObject.InsertEntry(myKey, []byte(myValue)))
+	byteEntry, err := storageObject.GetEntry(myKey)
+	assert.Nil(t, err)
+	assert.Equal(t, myValue, string(byteEntry))
+	assert.Nil(t, storageObject.UpdateEntry(myKey, []byte(updatedValue)))
+	byteEntry, err = storageObject.GetEntry(myKey)
+	assert.Nil(t, err)
+	assert.Equal(t, updatedValue, string(byteEntry))
+	assert.Nil(t, storageObject.RemoveEntry(myKey))
+	byteEntry, err = storageObject.GetEntry(myKey)
+	assert.NotNil(t, err)
+	assert.Equal(t, make([]byte, 0), byteEntry)
+}
