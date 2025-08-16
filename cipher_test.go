@@ -51,3 +51,13 @@ func TestGenKeypairAlreadyExists(t *testing.T) {
 	// second try
 	assert.NotNil(t, genKeypair())
 }
+
+func TestCheckPrivateAndPublicKeys(t *testing.T) {
+	defer cipherSetup()()
+	assert.Nil(t, genKeypair())
+	privateKey, publicKey, err := readFromStorage(alternateDir)
+	assert.Nil(t, err)
+	assert.NotNil(t, privateKey)
+	assert.NotNil(t, publicKey)
+	assert.True(t, privateKey.PublicKey.Equal(publicKey))
+}

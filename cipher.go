@@ -39,12 +39,12 @@ func encode(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) ([]byte, [
 	return pemEncoded, pemEncodedPub
 }
 
-func decode(pemEncoded string, pemEncodePub string) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
-	bytes, _ := pem.Decode([]byte(pemEncoded))
+func decode(pemEncoded []byte, pemEncodePub []byte) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
+	bytes, _ := pem.Decode(pemEncoded)
 	x509Encoded := bytes.Bytes
 	privateKey, _ := x509.ParseECPrivateKey(x509Encoded)
 
-	bytesPub, _ := pem.Decode([]byte(pemEncodePub))
+	bytesPub, _ := pem.Decode(pemEncodePub)
 	x509EncodedPub := bytesPub.Bytes
 	genericPublicKey, _ := x509.ParsePKIXPublicKey(x509EncodedPub)
 	publicKey := genericPublicKey.(*ecdsa.PublicKey)
@@ -75,4 +75,25 @@ func writeToStorage(privateKey []byte, publicKey []byte, targetDir string, overw
 	}
 	err = os.WriteFile(publicPath, publicKey, 0644)
 	return err
+}
+
+func readFromStorage(targetDir string) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
+	privatePath := path.Join(targetDir, privateFile)
+	if _, err := os.Stat(privatePath); os.IsNotExist(err) {
+		return nil, nil, errors.New("private key does not exist")
+	}
+	publicPath := path.Join(targetDir, publicFile)
+	if _, err := os.Stat(publicPath); os.IsNotExist(err) {
+		return nil, nil, errors.New("public key does not exist")
+	}
+	privateBytes, err := os.ReadFile(privatePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	publicBytes, err := os.ReadFile(publicPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	privKey, pubKey := decode(privateBytes, publicBytes)
+	return privKey, pubKey, nil
 }
