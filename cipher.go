@@ -1,0 +1,78 @@
+package cachekv
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"log"
+	"os"
+	"path"
+)
+
+var (
+	privateDir  = "./private"
+	privateFile = "key.pem"
+	publicFile  = "public.pem"
+)
+
+func genKeypair() error {
+	curve := elliptic.P384()
+	private, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		log.Printf("Error generating keypair: %v", err)
+		return err
+	}
+	public := &private.PublicKey
+	strPrivate, strPublic := encode(private, public)
+	err = writeToStorage(strPrivate, strPublic, privateDir)
+	return err
+}
+
+func encode(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) ([]byte, []byte) {
+	x509Encoded, _ := x509.MarshalECPrivateKey(privateKey)
+	pemEncoded := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: x509Encoded})
+	x509EncodePub, _ := x509.MarshalPKIXPublicKey(publicKey)
+	pemEncodedPub := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: x509EncodePub})
+	return pemEncoded, pemEncodedPub
+}
+
+func decode(pemEncoded string, pemEncodePub string) (*ecdsa.PrivateKey, *ecdsa.PublicKey) {
+	bytes, _ := pem.Decode([]byte(pemEncoded))
+	x509Encoded := bytes.Bytes
+	privateKey, _ := x509.ParseECPrivateKey(x509Encoded)
+
+	bytesPub, _ := pem.Decode([]byte(pemEncodePub))
+	x509EncodedPub := bytesPub.Bytes
+	genericPublicKey, _ := x509.ParsePKIXPublicKey(x509EncodedPub)
+	publicKey := genericPublicKey.(*ecdsa.PublicKey)
+	return privateKey, publicKey
+}
+
+func writeToStorage(privateKey []byte, publicKey []byte, targetDir string, overwrite ...bool) error {
+	privatePath := path.Join(targetDir, privateFile)
+	publicPath := path.Join(targetDir, publicFile)
+	shouldOverwrite := false
+	if len(overwrite) > 0 {
+		shouldOverwrite = overwrite[0]
+	}
+	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
+		err = os.MkdirAll(targetDir, 0744)
+		if err != nil {
+			return err
+		}
+	}
+	_, errPrivate := os.Stat(privatePath)
+	_, errPublic := os.Stat(publicPath)
+	if (errPrivate == nil || errPublic == nil) && !shouldOverwrite {
+		return errors.New("target file(s) already exists")
+	}
+	err := os.WriteFile(privatePath, privateKey, 0600)
+	if err != nil {
+		return err
+	}
+	err = os.WriteFile(publicPath, publicKey, 0644)
+	return err
+}
