@@ -10,6 +10,8 @@ import (
 	"log"
 	"os"
 	"path"
+
+	"github.com/foundriesio/go-ecies"
 )
 
 var (
@@ -28,6 +30,9 @@ func genKeypair() error {
 	public := &private.PublicKey
 	strPrivate, strPublic := encode(private, public)
 	err = writeToStorage(strPrivate, strPublic, privateDir)
+	// import the keys as ECIES keys
+	_ = ecies.ImportECDSA(private)
+	_ = ecies.ImportECDSAPublic(public)
 	return err
 }
 
