@@ -839,3 +839,7 @@ func UpdateConfigurations(config *Config) error {
 	}
 	return err
 }
+
+func Cache(value []byte, duration time.Duration) error {
+	return nil
+}
