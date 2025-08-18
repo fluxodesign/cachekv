@@ -61,3 +61,15 @@ func TestCheckPrivateAndPublicKeys(t *testing.T) {
 	assert.NotNil(t, publicKey)
 	assert.True(t, privateKey.PublicKey.Equal(publicKey))
 }
+
+func TestEncryptDecryptMessage(t *testing.T) {
+	defer cipherSetup()()
+	assert.Nil(t, genKeypair())
+	sharedValue := []byte("34534532|34t4645")
+	message := []byte("Hello,World! This is me!")
+	encrypted, err := encryptMessage(message, sharedValue)
+	assert.Nil(t, err)
+	decrypted, err := decryptMessage(encrypted, sharedValue)
+	assert.Nil(t, err)
+	assert.Equal(t, message, decrypted)
+}

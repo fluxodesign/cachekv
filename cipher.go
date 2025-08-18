@@ -30,9 +30,6 @@ func genKeypair() error {
 	public := &private.PublicKey
 	strPrivate, strPublic := encode(private, public)
 	err = writeToStorage(strPrivate, strPublic, privateDir)
-	// import the keys as ECIES keys
-	_ = ecies.ImportECDSA(private)
-	_ = ecies.ImportECDSAPublic(public)
 	return err
 }
 
@@ -101,4 +98,25 @@ func readFromStorage(targetDir string) (*ecdsa.PrivateKey, *ecdsa.PublicKey, err
 	}
 	privKey, pubKey := decode(privateBytes, publicBytes)
 	return privKey, pubKey, nil
+}
+
+func encryptMessage(message []byte, shared []byte) ([]byte, error) {
+	_, ecdsaPub, err := readFromStorage(privateDir)
+	if err != nil {
+		return nil, err
+	}
+	// import the keys as ECIES keys
+	eciesPublic := ecies.ImportECDSAPublic(ecdsaPub)
+	encrypted, err := ecies.Encrypt(rand.Reader, eciesPublic, message, shared, nil)
+	return encrypted, err
+}
+
+func decryptMessage(encrypted []byte, shared []byte) ([]byte, error) {
+	ecdsaPriv, _, err := readFromStorage(privateDir)
+	if err != nil {
+		return nil, err
+	}
+	eciesPrivate := ecies.ImportECDSA(ecdsaPriv)
+	decrypted, err := ecies.Decrypt(eciesPrivate, encrypted, shared, nil)
+	return decrypted, err
 }
