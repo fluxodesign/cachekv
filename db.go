@@ -41,7 +41,7 @@ func Startup() {
 	_, err := os.Stat(StorePath)
 	if err != nil && os.IsNotExist(err) {
 		syscall.Umask(0)
-		err = os.MkdirAll(StorePath, 0755)
+		err = os.MkdirAll(StorePath, 0744)
 		if err != nil {
 			log.Fatal("error creating store dir: ", err)
 			return
