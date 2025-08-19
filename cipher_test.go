@@ -73,3 +73,24 @@ func TestEncryptDecryptMessage(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, message, decrypted)
 }
+
+func TestHashFile(t *testing.T) {
+	defer cipherSetup()()
+	assert.Nil(t, genKeypair())
+	privatePath := path.Join(alternateDir, privateFile)
+	publicPath := path.Join(alternateDir, publicFile)
+	hash, err := hashFile(privatePath)
+	assert.Nil(t, err)
+	assert.NotNil(t, hash)
+	secondHash, err := hashFile(privatePath)
+	assert.Nil(t, err)
+	assert.NotNil(t, secondHash)
+	assert.Equal(t, hash, secondHash)
+	hash, err = hashFile(publicPath)
+	assert.Nil(t, err)
+	assert.NotNil(t, hash)
+	secondHash, err = hashFile(publicPath)
+	assert.Nil(t, err)
+	assert.NotNil(t, secondHash)
+	assert.Equal(t, hash, secondHash)
+}

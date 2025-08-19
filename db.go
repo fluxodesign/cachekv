@@ -26,7 +26,9 @@ import (
 // meta db stores the list of databases we have, etc.
 var (
 	StorePath   = "./store/"
+	KeyPath     = privateDir
 	metaStorage Storage
+	keyStorage  Storage
 	fxConfig    *Config
 )
 
@@ -44,6 +46,11 @@ func Startup() {
 		err = os.MkdirAll(StorePath, 0744)
 		if err != nil {
 			log.Fatal("error creating store dir: ", err)
+			return
+		}
+		err = initKeyDb()
+		if err != nil {
+			log.Fatal("error initializing keydb: ", err)
 			return
 		}
 		err = initMetaDb()
@@ -209,6 +216,22 @@ func checkMetaFile() bool {
 		return false
 	}
 	return true
+}
+
+func initKeyDb() error {
+	keyStorage.path = StorePath
+	keyStorage.file = "lock.db"
+	err := genKeypair()
+	if err != nil {
+		return err
+	}
+	privatePath := path.Join(KeyPath, privateFile)
+	hash, err := hashFile(privatePath)
+	if err != nil {
+		return err
+	}
+	log.Println(hash)
+	return nil
 }
 
 func initMetaDb() error {

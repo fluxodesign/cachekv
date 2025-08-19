@@ -4,9 +4,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -15,7 +18,7 @@ import (
 )
 
 var (
-	privateDir  = "./private"
+	privateDir  = "./.private"
 	privateFile = "key.pem"
 	publicFile  = "public.pem"
 )
@@ -119,4 +122,24 @@ func decryptMessage(encrypted []byte, shared []byte) ([]byte, error) {
 	eciesPrivate := ecies.ImportECDSA(ecdsaPriv)
 	decrypted, err := ecies.Decrypt(eciesPrivate, encrypted, shared, nil)
 	return decrypted, err
+}
+
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			log.Printf("Error closing file: %v", err)
+		}
+	}(file)
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	byteHash := hash.Sum(nil)
+	strHash := hex.EncodeToString(byteHash)
+	return strHash, nil
 }

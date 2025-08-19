@@ -18,6 +18,7 @@ const alternateTestStorePath = "./test-alternate/"
 
 func setup() func() {
 	StorePath = "./test-store/"
+	KeyPath = "./.test-private/"
 	keyring.MockInit()
 	var err error
 	Startup()
@@ -34,6 +35,10 @@ func setup() func() {
 			if err != nil {
 				log.Println("error removing test store path: ", err)
 			}
+		}
+		err = os.RemoveAll(KeyPath)
+		if err != nil {
+			log.Println("error removing test private path: ", err)
 		}
 		err = os.RemoveAll(alternateTestStorePath)
 		if err != nil {
