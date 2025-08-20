@@ -463,6 +463,17 @@ func TestGetEntryWithinALotOfEntries(t *testing.T) {
 func TestInitReloadingExistingMetafile(t *testing.T) {
 	defer setup()()
 	assert.Nil(t, openMetaDb())
+	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaDb, err := OpenDatabase(metaPath, metaStorage.key)
+	assert.Nil(t, err)
+	assert.NotNil(t, metaDb)
+	assert.Nil(t, CloseDatabase(metaDb))
+	assert.Nil(t, openKeyDb())
+	keyPath := path.Join(keyStorage.path, keyStorage.file)
+	keyDb, err := OpenDatabase(keyPath, keyStorage.key)
+	assert.Nil(t, err)
+	assert.NotNil(t, keyDb)
+	assert.Nil(t, CloseDatabase(keyDb))
 }
 
 func TestGetStorageObject(t *testing.T) {

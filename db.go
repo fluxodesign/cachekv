@@ -57,6 +57,12 @@ func Startup() {
 			return
 		}
 	} else {
+		// load up the key db
+		err = openKeyDb()
+		if err != nil {
+			log.Fatal("error opening keydb: ", err)
+			return
+		}
 		// load up the saved metafile
 		err = openMetaDb()
 		if err != nil {
@@ -313,6 +319,29 @@ func initMetaDb() error {
 	err = WriteMetaConfig(fxConfig)
 
 	return err
+}
+
+func openKeyDb() error {
+	keyStorage.path = StorePath
+	keyStorage.file = lockDb
+	keyPath := path.Join(keyStorage.path, keyStorage.file)
+	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
+		return err
+	}
+	privatePath := path.Join(privateDir, privateFile)
+	if _, err := os.Stat(privatePath); os.IsNotExist(err) {
+		return err
+	}
+	hash, err := hashFile(privatePath)
+	if err != nil {
+		return err
+	}
+	extractedKey, err := extractString(hash, keyLength)
+	if err != nil {
+		return err
+	}
+	keyStorage.key = []byte(extractedKey)
+	return nil
 }
 
 func openMetaDb() error {
