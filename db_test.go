@@ -17,7 +17,7 @@ const alternateTestStorePath = "./test-alternate/"
 
 func setup() func() {
 	StorePath = "./test-store/"
-	privateDir = "./.test-private/"
+	KeyPath = "./.test-private/"
 	var err error
 	Startup()
 	// teardown
@@ -38,7 +38,7 @@ func setup() func() {
 		if err != nil {
 			log.Println("error removing test alternate store path: ", err)
 		}
-		err = os.RemoveAll(privateDir)
+		err = os.RemoveAll(KeyPath)
 		if err != nil {
 			log.Println("error removing test private path: ", err)
 		}

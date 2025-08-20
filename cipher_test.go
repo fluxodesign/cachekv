@@ -16,7 +16,7 @@ var (
 
 func cipherSetup() func() {
 	var err error
-	privateDir = alternateDir
+	KeyPath = alternateDir
 	return func() {
 		err = os.RemoveAll(alternateDir)
 		if err != nil {

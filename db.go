@@ -270,7 +270,7 @@ func initKeyDb() error {
 	if err != nil {
 		return err
 	}
-	privatePath := path.Join(privateDir, privateFile)
+	privatePath := path.Join(KeyPath, privateFile)
 	hash, err := hashFile(privatePath)
 	if err != nil {
 		return err
@@ -329,7 +329,7 @@ func openKeyDb() error {
 	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
 		return err
 	}
-	privatePath := path.Join(privateDir, privateFile)
+	privatePath := path.Join(KeyPath, privateFile)
 	if _, err := os.Stat(privatePath); os.IsNotExist(err) {
 		return err
 	}

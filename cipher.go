@@ -19,7 +19,6 @@ import (
 )
 
 var (
-	privateDir  = "./.private"
 	privateFile = "key.pem"
 	publicFile  = "public.pem"
 )
@@ -33,7 +32,7 @@ func genKeypair() error {
 	}
 	public := &private.PublicKey
 	strPrivate, strPublic := encode(private, public)
-	err = writeToStorage(strPrivate, strPublic, privateDir)
+	err = writeToStorage(strPrivate, strPublic, KeyPath)
 	return err
 }
 
@@ -105,7 +104,7 @@ func readFromStorage(targetDir string) (*ecdsa.PrivateKey, *ecdsa.PublicKey, err
 }
 
 func encryptMessage(message []byte, shared []byte) ([]byte, error) {
-	_, ecdsaPub, err := readFromStorage(privateDir)
+	_, ecdsaPub, err := readFromStorage(KeyPath)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +115,7 @@ func encryptMessage(message []byte, shared []byte) ([]byte, error) {
 }
 
 func decryptMessage(encrypted []byte, shared []byte) ([]byte, error) {
-	ecdsaPriv, _, err := readFromStorage(privateDir)
+	ecdsaPriv, _, err := readFromStorage(KeyPath)
 	if err != nil {
 		return nil, err
 	}
