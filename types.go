@@ -49,6 +49,7 @@ const (
 	prefixMetaDb     = "fxstorage_db:"
 	prefixMetaEvent  = "fxstorage_event:"
 	prefixMetaConfig = "fxstorage_config"
+	lockDb           = "lock.db"
 	errDbRotating    = "maintenance: rotating key"
 	errDbInactive    = "error: trying to access inactive db"
 )

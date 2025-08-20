@@ -2,6 +2,7 @@ package cachekv
 
 import (
 	"log"
+	"math/rand"
 	"os"
 	"path"
 	"testing"
@@ -93,4 +94,37 @@ func TestHashFile(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, secondHash)
 	assert.Equal(t, hash, secondHash)
+}
+
+func TestExtractString(t *testing.T) {
+	var runes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	var paddings = []rune("#$%&^*0@!")
+	randomRunes := make([]rune, 64)
+	for i := range randomRunes {
+		randomRunes[i] = runes[rand.Intn(len(runes))]
+	}
+	randomString := string(randomRunes)
+	cutTo32 := randomString[:32]
+	extracted, err := extractString("", -32)
+	assert.NotNil(t, err)
+	assert.Equal(t, "", extracted)
+	extracted, err = extractString("", 32)
+	assert.Nil(t, err)
+	allPaddings := true
+	for _, r := range extracted {
+		matches := false
+		for _, j := range paddings {
+			if r == j {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			allPaddings = false
+		}
+	}
+	assert.True(t, allPaddings)
+	extracted, err = extractString(randomString, 32)
+	assert.Nil(t, err)
+	assert.Equal(t, cutTo32, extracted)
 }

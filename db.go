@@ -19,14 +19,12 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/zalando/go-keyring"
 	"google.golang.org/protobuf/proto"
 )
 
 // meta db stores the list of databases we have, etc.
 var (
 	StorePath   = "./store/"
-	KeyPath     = privateDir
 	metaStorage Storage
 	keyStorage  Storage
 	fxConfig    *Config
@@ -186,13 +184,53 @@ func getMetaDbObject(dbName string) (*DbObject, error) {
 }
 
 func WriteToKeyring(key string, value []byte) error {
-	err := keyring.Set(service, key, string(value))
+	if keyStorage.rotatingKey {
+		return errors.New(errDbRotating)
+	}
+	keyPath := path.Join(keyStorage.path, keyStorage.file)
+	db, err := OpenDatabase(keyPath, keyStorage.key)
+	if err != nil {
+		return err
+	}
+	defer func(db *badger.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Println("Error closing key db: ", err)
+		}
+	}(db)
+	err = setDbEntry([]byte(key), value, db)
 	return err
 }
 
 func getFromKeyring(key string) ([]byte, error) {
-	val, err := keyring.Get(service, key)
-	return []byte(val), err
+	if keyStorage.rotatingKey {
+		return nil, errors.New(errDbRotating)
+	}
+	keyPath := path.Join(keyStorage.path, keyStorage.file)
+	db, err := OpenDatabase(keyPath, keyStorage.key)
+	if err != nil {
+		return nil, err
+	}
+	defer func(db *badger.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Println("Error closing key db: ", err)
+		}
+	}(db)
+
+	value := make([]byte, 0)
+	err = db.View(func(txn *badger.Txn) error {
+		item, e := txn.Get([]byte(key))
+		if e != nil {
+			return e
+		}
+		e = item.Value(func(val []byte) error {
+			value = val
+			return nil
+		})
+		return e
+	})
+	return value, err
 }
 
 func randomValues(length int) ([]byte, error) {
@@ -220,18 +258,28 @@ func checkMetaFile() bool {
 
 func initKeyDb() error {
 	keyStorage.path = StorePath
-	keyStorage.file = "lock.db"
+	keyStorage.file = lockDb
 	err := genKeypair()
 	if err != nil {
 		return err
 	}
-	privatePath := path.Join(KeyPath, privateFile)
+	privatePath := path.Join(privateDir, privateFile)
 	hash, err := hashFile(privatePath)
 	if err != nil {
 		return err
 	}
-	log.Println(hash)
-	return nil
+	extractedKey, err := extractString(hash, keyLength)
+	if err != nil {
+		return err
+	}
+	keyStorage.key = []byte(extractedKey)
+	keyPath := path.Join(keyStorage.path, keyStorage.file)
+	keyStorage.db, err = OpenDatabase(keyPath, keyStorage.key)
+	if err != nil {
+		return err
+	}
+	err = CloseDatabase(keyStorage.db)
+	return err
 }
 
 func initMetaDb() error {

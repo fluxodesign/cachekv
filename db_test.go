@@ -11,15 +11,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"github.com/zalando/go-keyring"
 )
 
 const alternateTestStorePath = "./test-alternate/"
 
 func setup() func() {
 	StorePath = "./test-store/"
-	KeyPath = "./.test-private/"
-	keyring.MockInit()
+	privateDir = "./.test-private/"
 	var err error
 	Startup()
 	// teardown
@@ -31,18 +29,18 @@ func setup() func() {
 			if err != nil {
 				log.Println("error removing test db file: ", err)
 			}
-			err = os.RemoveAll(StorePath)
-			if err != nil {
-				log.Println("error removing test store path: ", err)
-			}
 		}
-		err = os.RemoveAll(KeyPath)
+		err = os.RemoveAll(StorePath)
 		if err != nil {
-			log.Println("error removing test private path: ", err)
+			log.Println("error removing test store path: ", err)
 		}
 		err = os.RemoveAll(alternateTestStorePath)
 		if err != nil {
 			log.Println("error removing test alternate store path: ", err)
+		}
+		err = os.RemoveAll(privateDir)
+		if err != nil {
+			log.Println("error removing test private path: ", err)
 		}
 	}
 }
@@ -207,7 +205,7 @@ func TestUpdateConfigurations(t *testing.T) {
 }
 
 func TestKeyring(t *testing.T) {
-	keyring.MockInit()
+	defer setup()()
 	err := WriteToKeyring("user", []byte("pass"))
 	assert.Nil(t, err)
 	pwd, err := getFromKeyring("user")

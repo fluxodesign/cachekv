@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	mrand "math/rand"
 	"os"
 	"path"
 
@@ -142,4 +143,19 @@ func hashFile(path string) (string, error) {
 	byteHash := hash.Sum(nil)
 	strHash := hex.EncodeToString(byteHash)
 	return strHash, nil
+}
+
+func extractString(source string, intendedLength int) (string, error) {
+	var paddingChars = []rune("#$%&^*0@!")
+	if intendedLength <= 0 {
+		return "", errors.New("invalid intended length, you are asking for the impossible")
+	}
+	if len(source) < intendedLength {
+		padding := make([]rune, intendedLength-len(source))
+		for i := range padding {
+			padding[i] = paddingChars[mrand.Intn(len(paddingChars))]
+		}
+		return source + string(padding), nil
+	}
+	return source[:intendedLength], nil
 }
