@@ -25,6 +25,7 @@ import (
 // meta db stores the list of databases we have, etc.
 var (
 	StorePath   = "./store/"
+	KeyPath     = "./.private"
 	metaStorage Storage
 	keyStorage  Storage
 	fxConfig    *Config
