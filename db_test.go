@@ -514,3 +514,15 @@ func TestDbObjectInsertEntry(t *testing.T) {
 	assert.NotNil(t, err)
 	assert.Equal(t, make([]byte, 0), byteEntry)
 }
+
+func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {
+	defer setup()()
+	keyPath := path.Join(keyStorage.path, keyStorage.file)
+	_, err := os.Stat(keyPath)
+	assert.Nil(t, err)
+	err = os.RemoveAll(keyPath)
+	assert.Nil(t, err)
+	assert.Nil(t, openKeyDb())
+	_, err = os.Stat(keyPath)
+	assert.Nil(t, err)
+}

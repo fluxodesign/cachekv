@@ -49,8 +49,10 @@ func TestGenKeypairAlreadyExists(t *testing.T) {
 	assert.Nil(t, err)
 	_, err = os.Stat(publicPath)
 	assert.Nil(t, err)
-	// second try
-	assert.NotNil(t, genKeypair())
+	// second try - overwriting
+	assert.Nil(t, genKeypair())
+	files, err := os.ReadDir(alternateDir)
+	assert.Equal(t, 4, len(files))
 }
 
 func TestCheckPrivateAndPublicKeys(t *testing.T) {

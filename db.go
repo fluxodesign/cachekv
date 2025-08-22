@@ -327,7 +327,12 @@ func openKeyDb() error {
 	keyStorage.file = lockDb
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
 	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		return err
+		// I'm not finding the key db, init one
+		err = initKeyDb()
+		if err != nil {
+			log.Println("Error opening/initialising key db: ", err)
+			return err
+		}
 	}
 	privatePath := path.Join(KeyPath, privateFile)
 	if _, err := os.Stat(privatePath); os.IsNotExist(err) {

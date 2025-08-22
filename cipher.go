@@ -14,6 +14,8 @@ import (
 	mrand "math/rand"
 	"os"
 	"path"
+	"strconv"
+	"time"
 
 	"github.com/foundriesio/go-ecies"
 )
@@ -24,6 +26,7 @@ var (
 )
 
 func genKeypair() error {
+	// WARNING: this will overwrite existing keypair
 	curve := elliptic.P384()
 	private, err := ecdsa.GenerateKey(curve, rand.Reader)
 	if err != nil {
@@ -32,7 +35,7 @@ func genKeypair() error {
 	}
 	public := &private.PublicKey
 	strPrivate, strPublic := encode(private, public)
-	err = writeToStorage(strPrivate, strPublic, KeyPath)
+	err = writeToStorage(strPrivate, strPublic, KeyPath, true)
 	return err
 }
 
@@ -71,8 +74,24 @@ func writeToStorage(privateKey []byte, publicKey []byte, targetDir string, overw
 	}
 	_, errPrivate := os.Stat(privatePath)
 	_, errPublic := os.Stat(publicPath)
-	if (errPrivate == nil || errPublic == nil) && !shouldOverwrite {
-		return errors.New("target file(s) already exists")
+	if errPrivate == nil || errPublic == nil {
+		if !shouldOverwrite {
+			return errors.New("target file(s) already exists")
+		} else {
+			// not really overwriting file, rename
+			oldPath := privatePath
+			newPath := privatePath + "." + strconv.FormatInt(time.Now().Unix(), 10)
+			err := os.Rename(oldPath, newPath)
+			if err != nil {
+				return err
+			}
+			oldPath = publicPath
+			newPath = publicPath + "." + strconv.FormatInt(time.Now().Unix(), 10)
+			err = os.Rename(oldPath, newPath)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	err := os.WriteFile(privatePath, privateKey, 0600)
 	if err != nil {
