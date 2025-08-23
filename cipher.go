@@ -21,8 +21,8 @@ import (
 )
 
 var (
-	privateFile = "key.pem"
-	publicFile  = "public.pem"
+	privateFile = "cvc-key.pem"
+	publicFile  = "cvc-public.pem"
 )
 
 func genKeypair() error {
