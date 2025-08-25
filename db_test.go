@@ -526,3 +526,16 @@ func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {
 	_, err = os.Stat(keyPath)
 	assert.Nil(t, err)
 }
+
+func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
+	defer setup()()
+	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	_, err := os.Stat(metaPath)
+	assert.Nil(t, err)
+	err = os.RemoveAll(metaPath)
+	assert.Nil(t, err)
+	assert.Nil(t, openMetaDb())
+	metaPath = path.Join(metaStorage.path, metaStorage.file)
+	_, err = os.Stat(metaPath)
+	assert.Nil(t, err)
+}

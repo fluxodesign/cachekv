@@ -358,6 +358,13 @@ func openMetaDb() error {
 		log.Println("error reading store dir: ", err)
 		return err
 	}
+	if len(entries) == 0 {
+		err = initMetaDb()
+		if err != nil {
+			log.Println("Error opening/initialising meta db: ", err)
+			return err
+		}
+	}
 	for _, entry := range entries {
 		if entry.IsDir() && strings.HasPrefix(entry.Name(), "meta-") {
 			fInfo, e := entry.Info()
@@ -382,9 +389,14 @@ func openMetaDb() error {
 		}
 		metaStorage.key = key
 		return nil
+	} else {
+		err = initMetaDb()
+		if err != nil {
+			log.Println("Error opening/initialising meta db: ", err)
+			return err
+		}
+		return nil
 	}
-
-	return errors.New("failed to open meta db")
 }
 
 func GetStorageObject(dbName string) (*Storage, error) {
