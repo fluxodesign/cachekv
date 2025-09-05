@@ -473,6 +473,7 @@ func TestInitReloadingExistingMetafile(t *testing.T) {
 	keyDb, err := OpenDatabase(keyPath, keyStorage.key)
 	assert.Nil(t, err)
 	assert.NotNil(t, keyDb)
+	assert.True(t, checkConfig())
 	assert.Nil(t, CloseDatabase(keyDb))
 }
 

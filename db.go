@@ -160,6 +160,19 @@ func WriteMetaConfig(config *Config) error {
 	return err
 }
 
+func getMetaConfig() (*Config, error) {
+	entry, err := getMetaEntry(prefixMetaConfig)
+	if err != nil {
+		return nil, err
+	}
+	config := &Config{}
+	err = json.Unmarshal(entry, config)
+	if err != nil {
+		return nil, err
+	}
+	return config, err
+}
+
 func writeMetaDbObject(dbName string, dbObject *DbObject, isUpdate bool) error {
 	jsonDb, err := json.Marshal(dbObject)
 	if err != nil {
@@ -258,6 +271,16 @@ func checkMetaFile() bool {
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
+func checkConfig() bool {
+	if fxConfig == nil {
+		return false
+	}
+	if fxConfig.StorePath != StorePath {
 		return false
 	}
 	return true
@@ -388,7 +411,6 @@ func openMetaDb() error {
 			return err
 		}
 		metaStorage.key = key
-		return nil
 	} else {
 		err = initMetaDb()
 		if err != nil {
@@ -397,6 +419,8 @@ func openMetaDb() error {
 		}
 		return nil
 	}
+	fxConfig, err = getMetaConfig()
+	return err
 }
 
 func GetStorageObject(dbName string) (*Storage, error) {
