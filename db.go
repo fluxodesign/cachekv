@@ -200,6 +200,7 @@ func getMetaDbObject(dbName string) (*DbObject, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = writeMetaEvent(EventTypeRead, "Read meta db object: "+prefixMetaDb+dbName)
 	return dbo, err
 }
 
@@ -339,6 +340,7 @@ func initMetaDb() error {
 	if err != nil {
 		return err
 	}
+	_ = writeMetaEvent(EventTypeWrite, "wrote keyring")
 	fxConfig = DefaultConfig()
 	err = WriteMetaConfig(fxConfig)
 
@@ -833,15 +835,19 @@ func RemoveEntry(dbName string, key string) error {
 	if err != nil {
 		return err
 	}
+	_ = writeMetaEvent(EventTypeDelete, "Deleted entry: "+dbName+":"+key)
 
 	err = CloseDatabase(db)
 	return err
 }
 
 func (t *Storage) RemoveEntry(key string) error {
-	return t.db.Update(func(txn *badger.Txn) error {
+	err := t.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete([]byte(key))
 	})
+	_ = writeMetaEvent(EventTypeDelete, "Deleted entry: "+t.file+":"+key)
+	return err
+
 }
 
 func BatchInsert(dbName string, entries map[string][]byte) error {
@@ -873,6 +879,12 @@ func BatchInsert(dbName string, entries map[string][]byte) error {
 	}
 
 	err = CloseDatabase(db)
+	return err
+}
+
+func (t *Storage) BatchInsert(entries *map[string][]byte) error {
+	err := batchInsertGeneric(entries, t.db)
+	_ = writeMetaEvent(EventTypeWrite, "Wrote batch data to db: "+t.file)
 	return err
 }
 
@@ -909,6 +921,29 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 
 func (t *Storage) GetEntry(key string) ([]byte, error) {
 	return getDbEntry([]byte(key), t.db)
+}
+
+func (t *Storage) All() (map[string][]byte, error) {
+	m := make(map[string][]byte)
+	db := t.db
+	err := db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			k := item.Key()
+			err := item.Value(func(v []byte) error {
+				m[string(k)] = v
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return m, err
 }
 
 func ListDatabases() ([]string, error) {

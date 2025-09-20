@@ -1,9 +1,11 @@
 package cachekv
 
 import (
+	"encoding/json"
 	"log"
 	"maps"
 	"math/rand"
+	randv2 "math/rand/v2"
 	"os"
 	"path"
 	"testing"
@@ -539,4 +541,115 @@ func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
 	metaPath = path.Join(metaStorage.path, metaStorage.file)
 	_, err = os.Stat(metaPath)
 	assert.Nil(t, err)
+}
+
+func TestBatchInsert(t *testing.T) {
+	defer setup()()
+	type blah struct {
+		Id    string `json:"id"`
+		Value int64  `json:"value"`
+	}
+	n := 2000
+	values := make(map[string][]byte)
+	assert.Nil(t, CreateDatabase("test-table", true))
+	dbObject, err := GetStorageObject("test-table")
+	assert.Nil(t, err)
+	assert.NotNil(t, dbObject)
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		found := true
+		for found == true {
+			newKey := uuid.NewString()
+			_, found = values[newKey]
+			if !found {
+				rv, _ := randomValues(keyLength)
+				b := blah{
+					Id:    string(rv),
+					Value: randv2.Int64(),
+				}
+				jsonEncoded, ex := json.Marshal(b)
+				assert.Nil(t, ex)
+				values[newKey] = jsonEncoded
+			}
+		}
+	}
+	assert.Nil(t, dbObject.BatchInsert(&values))
+	end := time.Now()
+	duration := end.Sub(start)
+	log.Printf("data generation completed in %d ms\n", int(duration.Milliseconds()))
+	// check for each item in db
+	for key, value := range values {
+		entry, ex := dbObject.GetEntry(key)
+		assert.Nil(t, ex)
+		dbBlah := blah{}
+		assert.Nil(t, json.Unmarshal(entry, &dbBlah))
+
+		originalBlah := blah{}
+		assert.Nil(t, json.Unmarshal(value, &originalBlah))
+		assert.Equal(t, originalBlah.Id, dbBlah.Id)
+		assert.Equal(t, originalBlah.Value, dbBlah.Value)
+	}
+}
+
+func TestGetAllEntries(t *testing.T) {
+	defer setup()()
+	type blah struct {
+		Id    string `json:"id"`
+		Value int64  `json:"value"`
+	}
+	n := 200
+	values := make(map[string][]byte)
+	assert.Nil(t, CreateDatabase("test-table", true))
+	dbObject, err := GetStorageObject("test-table")
+	assert.Nil(t, err)
+	assert.NotNil(t, dbObject)
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		found := true
+		for found == true {
+			newKey := uuid.NewString()
+			_, found = values[newKey]
+			if !found {
+				rv, _ := randomValues(keyLength)
+				b := blah{
+					Id:    string(rv),
+					Value: randv2.Int64(),
+				}
+				jsonEncoded, ex := json.Marshal(b)
+				assert.Nil(t, ex)
+				values[newKey] = jsonEncoded
+			}
+		}
+	}
+	assert.Nil(t, dbObject.BatchInsert(&values))
+	end := time.Now()
+	duration := end.Sub(start)
+	log.Printf("data generation completed in %d ms\n", int(duration.Milliseconds()))
+	// making sure each key is unique
+
+	// get all entries and compare
+	start = time.Now()
+	allItems, err := dbObject.All()
+	end = time.Now()
+	assert.Nil(t, err)
+	duration = end.Sub(start)
+	log.Printf("getting all records completed in %d ms\n", int(duration.Milliseconds()))
+	assert.Equal(t, n, len(allItems))
+	assert.Equal(t, n, len(values))
+	for key, item := range values {
+		value := allItems[key]
+		assert.NotNil(t, value)
+
+		// item MUST be equal to value
+		assert.Equal(t, item, value)
+
+		var originalBlah blah
+		assert.Nil(t, json.Unmarshal(item, &originalBlah))
+		var dbBlah blah
+		assert.Nil(t, json.Unmarshal(value, &dbBlah))
+		log.Printf("original id: %s, db id: %s\n", originalBlah.Id, dbBlah.Id)
+		assert.Equal(t, originalBlah.Id, dbBlah.Id)
+		log.Printf("original value: %d, db value: %d\n", originalBlah.Value, dbBlah.Value)
+		assert.Equal(t, originalBlah.Value, dbBlah.Value)
+	}
 }
