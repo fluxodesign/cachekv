@@ -545,7 +545,7 @@ func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
 
 func TestBatchInsert(t *testing.T) {
 	defer setup()()
-	type blah struct {
+	type testStruct struct {
 		Id    string `json:"id"`
 		Value int64  `json:"value"`
 	}
@@ -563,7 +563,7 @@ func TestBatchInsert(t *testing.T) {
 			_, found = generated[newKey]
 			if !found {
 				rv, _ := randomValues(keyLength)
-				b := blah{
+				b := testStruct{
 					Id:    string(rv),
 					Value: randv2.Int64(),
 				}
@@ -581,13 +581,13 @@ func TestBatchInsert(t *testing.T) {
 	for key, value := range generated {
 		entry, ex := dbObject.GetEntry(key)
 		assert.Nil(t, ex)
-		dbBlah := blah{}
-		assert.Nil(t, json.Unmarshal(entry, &dbBlah))
+		dbItem := testStruct{}
+		assert.Nil(t, json.Unmarshal(entry, &dbItem))
 
-		originalBlah := blah{}
-		assert.Nil(t, json.Unmarshal(value, &originalBlah))
-		assert.Equal(t, originalBlah.Id, dbBlah.Id)
-		assert.Equal(t, originalBlah.Value, dbBlah.Value)
+		originalItem := testStruct{}
+		assert.Nil(t, json.Unmarshal(value, &originalItem))
+		assert.Equal(t, originalItem.Id, dbItem.Id)
+		assert.Equal(t, originalItem.Value, dbItem.Value)
 	}
 }
 
@@ -597,7 +597,7 @@ func TestGetAllEntries(t *testing.T) {
 		Id    string `json:"id"`
 		Value int64  `json:"value"`
 	}
-	n := 10000
+	n := 1000000
 	values := make(map[string][]byte)
 	assert.Nil(t, CreateDatabase("test-table", true))
 	dbObject, err := GetStorageObject("test-table")
@@ -623,9 +623,9 @@ func TestGetAllEntries(t *testing.T) {
 	}
 	assert.Nil(t, dbObject.BatchInsert(&values))
 	end := time.Now()
-	duration := end.Sub(start)
-	log.Printf("data generation completed in %d ms\n", int(duration.Milliseconds()))
+	genDuration := end.Sub(start)
 	// check for each item in db
+	start = time.Now()
 	for k, v := range values {
 		entry, ex := dbObject.GetEntry(k)
 		assert.Nil(t, ex)
@@ -637,17 +637,22 @@ func TestGetAllEntries(t *testing.T) {
 		assert.Equal(t, originalEntry.Id, dbBlah.Id)
 		assert.Equal(t, originalEntry.Value, dbBlah.Value)
 	}
+	end = time.Now()
+	manualCheckDuration := end.Sub(start)
 
 	// get all entries and compare
 	start = time.Now()
 	allItems, err := dbObject.All()
 	end = time.Now()
 	assert.Nil(t, err)
-	duration = end.Sub(start)
-	log.Printf("getting all records completed in %d ms\n", int(duration.Milliseconds()))
+	getAllDuration := end.Sub(start)
+
 	assert.Equal(t, n, len(allItems))
 	assert.Equal(t, n, len(values))
+	counter := 0
+	start = time.Now()
 	for key, item := range values {
+		counter++
 		value := allItems[key]
 		assert.NotNil(t, value)
 
@@ -658,9 +663,16 @@ func TestGetAllEntries(t *testing.T) {
 		assert.Nil(t, json.Unmarshal(item, &originalBlah))
 		var dbBlah blah
 		assert.Nil(t, json.Unmarshal(value, &dbBlah))
-		log.Printf("original id: %s, db id: %s\n", originalBlah.Id, dbBlah.Id)
+		log.Printf("%d - original id: %s, db id: %s\n", counter, originalBlah.Id, dbBlah.Id)
 		assert.Equal(t, originalBlah.Id, dbBlah.Id)
-		log.Printf("original value: %d, db value: %d\n", originalBlah.Value, dbBlah.Value)
+		log.Printf("%d - original value: %d, db value: %d\n", counter, originalBlah.Value, dbBlah.Value)
 		assert.Equal(t, originalBlah.Value, dbBlah.Value)
 	}
+	end = time.Now()
+	allCheckDuration := end.Sub(start)
+
+	log.Printf("data generation completed in %d ms\n", int(genDuration.Milliseconds()))
+	log.Printf("manual check completed in %d ms\n", int(manualCheckDuration.Milliseconds()))
+	log.Printf("getting all records completed in %d ms\n", int(getAllDuration.Milliseconds()))
+	log.Printf("get all check completed in %d ms\n", int(allCheckDuration.Milliseconds()))
 }
