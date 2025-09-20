@@ -549,7 +549,55 @@ func TestBatchInsert(t *testing.T) {
 		Id    string `json:"id"`
 		Value int64  `json:"value"`
 	}
-	n := 2000
+	n := 10000
+	generated := make(map[string][]byte)
+	assert.Nil(t, CreateDatabase("test-table", true))
+	dbObject, err := GetStorageObject("test-table")
+	assert.Nil(t, err)
+	assert.NotNil(t, dbObject)
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		found := true
+		for found == true {
+			newKey := uuid.NewString()
+			_, found = generated[newKey]
+			if !found {
+				rv, _ := randomValues(keyLength)
+				b := blah{
+					Id:    string(rv),
+					Value: randv2.Int64(),
+				}
+				jsonEncoded, ex := json.Marshal(b)
+				assert.Nil(t, ex)
+				generated[newKey] = jsonEncoded
+			}
+		}
+	}
+	assert.Nil(t, dbObject.BatchInsert(&generated))
+	end := time.Now()
+	duration := end.Sub(start)
+	log.Printf("data generation completed in %d ms\n", int(duration.Milliseconds()))
+	// check for each item in db
+	for key, value := range generated {
+		entry, ex := dbObject.GetEntry(key)
+		assert.Nil(t, ex)
+		dbBlah := blah{}
+		assert.Nil(t, json.Unmarshal(entry, &dbBlah))
+
+		originalBlah := blah{}
+		assert.Nil(t, json.Unmarshal(value, &originalBlah))
+		assert.Equal(t, originalBlah.Id, dbBlah.Id)
+		assert.Equal(t, originalBlah.Value, dbBlah.Value)
+	}
+}
+
+func TestGetAllEntries(t *testing.T) {
+	defer setup()()
+	type blah struct {
+		Id    string `json:"id"`
+		Value int64  `json:"value"`
+	}
+	n := 10000
 	values := make(map[string][]byte)
 	assert.Nil(t, CreateDatabase("test-table", true))
 	dbObject, err := GetStorageObject("test-table")
@@ -578,54 +626,17 @@ func TestBatchInsert(t *testing.T) {
 	duration := end.Sub(start)
 	log.Printf("data generation completed in %d ms\n", int(duration.Milliseconds()))
 	// check for each item in db
-	for key, value := range values {
-		entry, ex := dbObject.GetEntry(key)
+	for k, v := range values {
+		entry, ex := dbObject.GetEntry(k)
 		assert.Nil(t, ex)
 		dbBlah := blah{}
 		assert.Nil(t, json.Unmarshal(entry, &dbBlah))
 
-		originalBlah := blah{}
-		assert.Nil(t, json.Unmarshal(value, &originalBlah))
-		assert.Equal(t, originalBlah.Id, dbBlah.Id)
-		assert.Equal(t, originalBlah.Value, dbBlah.Value)
+		originalEntry := blah{}
+		assert.Nil(t, json.Unmarshal(v, &originalEntry))
+		assert.Equal(t, originalEntry.Id, dbBlah.Id)
+		assert.Equal(t, originalEntry.Value, dbBlah.Value)
 	}
-}
-
-func TestGetAllEntries(t *testing.T) {
-	defer setup()()
-	type blah struct {
-		Id    string `json:"id"`
-		Value int64  `json:"value"`
-	}
-	n := 200
-	values := make(map[string][]byte)
-	assert.Nil(t, CreateDatabase("test-table", true))
-	dbObject, err := GetStorageObject("test-table")
-	assert.Nil(t, err)
-	assert.NotNil(t, dbObject)
-	start := time.Now()
-	for i := 0; i < n; i++ {
-		found := true
-		for found == true {
-			newKey := uuid.NewString()
-			_, found = values[newKey]
-			if !found {
-				rv, _ := randomValues(keyLength)
-				b := blah{
-					Id:    string(rv),
-					Value: randv2.Int64(),
-				}
-				jsonEncoded, ex := json.Marshal(b)
-				assert.Nil(t, ex)
-				values[newKey] = jsonEncoded
-			}
-		}
-	}
-	assert.Nil(t, dbObject.BatchInsert(&values))
-	end := time.Now()
-	duration := end.Sub(start)
-	log.Printf("data generation completed in %d ms\n", int(duration.Milliseconds()))
-	// making sure each key is unique
 
 	// get all entries and compare
 	start = time.Now()

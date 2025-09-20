@@ -926,23 +926,21 @@ func (t *Storage) GetEntry(key string) ([]byte, error) {
 func (t *Storage) All() (map[string][]byte, error) {
 	m := make(map[string][]byte)
 	db := t.db
-	err := db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			k := item.Key()
-			err := item.Value(func(v []byte) error {
-				m[string(k)] = v
-				return nil
-			})
-			if err != nil {
+	stream := db.NewStream()
+	stream.NumGo = 20
+	stream.LogPrefix = "stream -> "
+	stream.KeyToList = nil
+	stream.Send = func(buffer *z.Buffer) error {
+		return buffer.SliceIterate(func(slice []byte) error {
+			kv := new(pb.KV)
+			if err := proto.Unmarshal(slice, kv); err != nil {
 				return err
 			}
-		}
-		return nil
-	})
+			m[string(kv.Key)] = kv.Value
+			return nil
+		})
+	}
+	err := stream.Orchestrate(context.Background())
 	return m, err
 }
 
