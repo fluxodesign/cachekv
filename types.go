@@ -1,6 +1,10 @@
 package cachekv
 
-import "github.com/dgraph-io/badger/v4"
+import (
+	"fmt"
+
+	"github.com/dgraph-io/badger/v4"
+)
 
 type Storage struct {
 	db          *badger.DB
@@ -53,3 +57,20 @@ const (
 	errDbRotating    = "maintenance: rotating key"
 	errDbInactive    = "error: trying to access inactive db"
 )
+
+type EMetaKeyNotFound struct {
+	Code    int
+	Message string
+	Wrapped error
+}
+
+func (e *EMetaKeyNotFound) Error() string {
+	if e.Wrapped != nil {
+		return fmt.Sprintf("%s (Code: %d)", e.Message, e.Code)
+	}
+	return fmt.Sprintf("%s (Code: %d)", e.Message, e.Code)
+}
+
+func (e *EMetaKeyNotFound) Unwrap() error {
+	return e.Wrapped
+}

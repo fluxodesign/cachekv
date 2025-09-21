@@ -121,6 +121,13 @@ func getMetaEntry(key string) ([]byte, error) {
 	err = db.View(func(txn *badger.Txn) error {
 		item, e := txn.Get([]byte(key))
 		if e != nil {
+			if strings.Contains(e.Error(), "not found") {
+				e = &EMetaKeyNotFound{
+					Code:    8404,
+					Message: e.Error(),
+					Wrapped: e,
+				}
+			}
 			return e
 		}
 		e = item.Value(func(val []byte) error {
@@ -720,25 +727,32 @@ func getDbKey(dbName string, dbObject *DbObject) ([]byte, error) {
 }
 
 func CreateDatabase(dbName string, secure bool) error {
+	// check first
+	exist, err := databaseExist(dbName)
+	if err != nil {
+		return err
+	}
+	if exist {
+		return errors.New("database already exists")
+	}
 	// open db with name and optional key - store the key on keyring
 	dbId, _ := randomValues(fileIdLength)
 	dbActualName := dbName + "-" + string(dbId)
 	dbPath := path.Join(fxConfig.StorePath, dbActualName)
 	var db *badger.DB
-	var err error
 	if secure {
-		key, err := randomValues(keyLength)
-		if err != nil {
-			return err
+		key, secErr := randomValues(keyLength)
+		if secErr != nil {
+			return secErr
 		}
-		db, err = OpenDatabase(dbPath, key)
-		if err != nil {
-			return err
+		db, secErr = OpenDatabase(dbPath, key)
+		if secErr != nil {
+			return secErr
 		}
 		b64Key := b64Encode(key)
-		err = WriteToKeyring(prefixMetaDb+dbName, []byte(b64Key))
-		if err != nil {
-			return err
+		secErr = WriteToKeyring(prefixMetaDb+dbName, []byte(b64Key))
+		if secErr != nil {
+			return secErr
 		}
 	} else {
 		db, err = openUnsecuredDb(dbPath)
@@ -762,6 +776,18 @@ func CreateDatabase(dbName string, secure bool) error {
 	}
 	err = CloseDatabase(db)
 	return err
+}
+
+func databaseExist(dbName string) (bool, error) {
+	_, err := GetStorageObject(dbName)
+	if err != nil {
+		var metaKeyNotFound *EMetaKeyNotFound
+		if errors.As(err, &metaKeyNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func InsertEntry(dbName string, key string, value []byte) error {

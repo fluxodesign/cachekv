@@ -676,3 +676,13 @@ func TestGetAllEntries(t *testing.T) {
 	log.Printf("getting all records completed in %d ms\n", int(getAllDuration.Milliseconds()))
 	log.Printf("get all check completed in %d ms\n", int(allCheckDuration.Milliseconds()))
 }
+
+func TestCreateSameDbs(t *testing.T) {
+	defer setup()()
+	testDb := "testdb"
+	assert.Nil(t, CreateDatabase(testDb, true))
+	// try creating it the second time
+	err := CreateDatabase(testDb, true)
+	assert.NotNil(t, err)
+	assert.Equal(t, err.Error(), "database already exists")
+}
