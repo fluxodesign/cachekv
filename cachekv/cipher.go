@@ -77,20 +77,20 @@ func writeToStorage(privateKey []byte, publicKey []byte, targetDir string, overw
 	if errPrivate == nil || errPublic == nil {
 		if !shouldOverwrite {
 			return errors.New("target file(s) already exists")
-		} else {
-			// not really overwriting file, rename
-			oldPath := privatePath
-			newPath := privatePath + "." + strconv.FormatInt(time.Now().Unix(), 10)
-			err := os.Rename(oldPath, newPath)
-			if err != nil {
-				return err
-			}
-			oldPath = publicPath
-			newPath = publicPath + "." + strconv.FormatInt(time.Now().Unix(), 10)
-			err = os.Rename(oldPath, newPath)
-			if err != nil {
-				return err
-			}
+		}
+
+		// not really overwriting file, rename
+		oldPath := privatePath
+		newPath := privatePath + "." + strconv.FormatInt(time.Now().Unix(), 10)
+		err := os.Rename(oldPath, newPath)
+		if err != nil {
+			return err
+		}
+		oldPath = publicPath
+		newPath = publicPath + "." + strconv.FormatInt(time.Now().Unix(), 10)
+		err = os.Rename(oldPath, newPath)
+		if err != nil {
+			return err
 		}
 	}
 	err := os.WriteFile(privatePath, privateKey, 0600)

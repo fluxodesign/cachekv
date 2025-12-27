@@ -746,6 +746,12 @@ func CreateDatabase(dbName string, secure bool) error {
 			return secErr
 		}
 		db, secErr = OpenDatabase(dbPath, key)
+		defer func() {
+			e := CloseDatabase(db)
+			if e != nil {
+				return
+			}
+		}()
 		if secErr != nil {
 			return secErr
 		}
@@ -756,6 +762,12 @@ func CreateDatabase(dbName string, secure bool) error {
 		}
 	} else {
 		db, err = openUnsecuredDb(dbPath)
+		defer func() {
+			e := CloseDatabase(db)
+			if e != nil {
+				return
+			}
+		}()
 		if err != nil {
 			return err
 		}
@@ -770,12 +782,7 @@ func CreateDatabase(dbName string, secure bool) error {
 		LastRotated: 0,
 		Deleted:     0,
 	}
-	err = writeMetaDbObject(dbName, &dbObject, false)
-	if err != nil {
-		return err
-	}
-	err = CloseDatabase(db)
-	return err
+	return writeMetaDbObject(dbName, &dbObject, false)
 }
 
 func databaseExist(dbName string) (bool, error) {
@@ -851,6 +858,12 @@ func RemoveEntry(dbName string, key string) error {
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 	}
+	defer func() {
+		e := CloseDatabase(db)
+		if e != nil {
+			return
+		}
+	}()
 	if err != nil {
 		return err
 	}
@@ -895,6 +908,12 @@ func BatchInsert(dbName string, entries map[string][]byte) error {
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 	}
+	defer func() {
+		e := CloseDatabase(db)
+		if e != nil {
+			return
+		}
+	}()
 	if err != nil {
 		return err
 	}
@@ -934,6 +953,12 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 	}
+	defer func() {
+		e := CloseDatabase(db)
+		if e != nil {
+			return
+		}
+	}()
 	if err != nil {
 		return nil, err
 	}
