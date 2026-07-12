@@ -177,3 +177,23 @@ func extractString(source string, intendedLength int) (string, error) {
 	}
 	return source[:intendedLength], nil
 }
+
+// deriveKeyFromPrivateKey generates a secure 32-byte key from EC private key bytes
+func deriveKeyFromPrivateKey(privateKey *ecdsa.PrivateKey) ([]byte, error) {
+	// Extract raw private scalar (cryptographically secure source)
+	privateBytes := privateKey.D.Bytes()
+
+	// Hash the private bytes to produce fixed-length output suitable for encryption keys
+	hash := sha256.Sum256(privateBytes)
+	return hash[:], nil
+}
+
+// generateSecureKey creates a cryptographically random key of specified length
+func generateSecureKey(length int) ([]byte, error) {
+	key := make([]byte, length)
+	_, err := rand.Read(key)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}

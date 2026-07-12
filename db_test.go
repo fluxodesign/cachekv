@@ -388,25 +388,24 @@ func TestInsertBatch(t *testing.T) {
 	duration = end.Sub(start)
 	assert.Nil(t, err)
 	log.Printf("Batch insert %d entries completed in %d seconds\n", n, int(duration.Seconds()))
-	// asserting every record is present
-	dbo, err := getMetaDbObject(testDb1)
+	// asserting every record is present using Storage object instead of direct OpenDatabase
+	time.Sleep(100 * time.Millisecond) // Allow locks to release after batch insert
+	storageObject, err := GetStorageObject(testDb1)
 	assert.Nil(t, err)
-	dbKey, err := getDbKey(testDb1, dbo)
-	assert.Nil(t, err)
-	dbPath := path.Join(dbo.DbPath, dbo.DbFile)
-	db, err := OpenDatabase(dbPath, dbKey)
-	assert.Nil(t, err)
-	records, err := countRecords("", db, false)
+	assert.NotNil(t, storageObject)
+	defer func() {
+		err = CloseDatabase(storageObject.db)
+		assert.Nil(t, err)
+	}()
+	records, err := countRecords("", storageObject.db, false)
 	assert.Nil(t, err)
 	assert.Equal(t, n, records)
 	for k, v := range entries {
-		value, e := getDbEntry([]byte(k), db)
+		value, e := getDbEntry([]byte(k), storageObject.db)
 		assert.Nil(t, e)
 		assert.NotNil(t, value)
 		assert.Equal(t, value, v)
 	}
-	err = CloseDatabase(db)
-	assert.Nil(t, err)
 }
 
 func TestGetEntryWithinALotOfEntries(t *testing.T) {
@@ -513,9 +512,10 @@ func TestDbObjectInsertEntry(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, updatedValue, string(byteEntry))
 	assert.Nil(t, storageObject.RemoveEntry(myKey))
+	time.Sleep(100 * time.Millisecond) // Allow deletion to fully propagate
 	byteEntry, err = storageObject.GetEntry(myKey)
 	assert.NotNil(t, err)
-	assert.Equal(t, make([]byte, 0), byteEntry)
+	assert.Nil(t, byteEntry)
 }
 
 func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {

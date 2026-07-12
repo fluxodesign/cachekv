@@ -2,6 +2,8 @@ package cachekv
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -58,6 +60,15 @@ const (
 	errDbInactive    = "error: trying to access inactive db"
 )
 
+// Global state with mutex protection for thread safety
+var (
+	globalStateMu  sync.RWMutex
+	metaStorage    Storage
+	keyStorage     Storage
+	fxConfig       *Config
+	connectionPool *ConnectionPool
+)
+
 type EMetaKeyNotFound struct {
 	Code    int
 	Message string
@@ -73,4 +84,25 @@ func (e *EMetaKeyNotFound) Error() string {
 
 func (e *EMetaKeyNotFound) Unwrap() error {
 	return e.Wrapped
+}
+
+// GetConnectionPool returns the shared connection pool instance
+func GetConnectionPool() *ConnectionPool {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+	if connectionPool == nil {
+		connectionPool = NewConnectionPool(5 * time.Minute)
+	}
+	return connectionPool
+}
+
+// Shutdown closes all pooled connections gracefully
+func Shutdown() error {
+	globalStateMu.Lock()
+	defer globalStateMu.Unlock()
+
+	if connectionPool != nil {
+		connectionPool.CloseAll()
+	}
+	return nil
 }

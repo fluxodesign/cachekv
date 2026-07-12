@@ -24,11 +24,8 @@ import (
 
 // meta db stores the list of databases we have, etc.
 var (
-	StorePath   = "./store/"
-	KeyPath     = "./.private"
-	metaStorage Storage
-	keyStorage  Storage
-	fxConfig    *Config
+	StorePath = "./store/"
+	KeyPath   = "./.private"
 )
 
 const (
@@ -121,10 +118,11 @@ func getMetaEntry(key string) ([]byte, error) {
 	err = db.View(func(txn *badger.Txn) error {
 		item, e := txn.Get([]byte(key))
 		if e != nil {
-			if strings.Contains(e.Error(), "not found") {
+			if errors.Is(e, badger.ErrKeyNotFound) ||
+				(e.Error() != "" && e.Error() == "key not found") {
 				e = &EMetaKeyNotFound{
 					Code:    8404,
-					Message: e.Error(),
+					Message: "meta key not found",
 					Wrapped: e,
 				}
 			}
@@ -461,7 +459,13 @@ func GetStorageObject(dbName string) (*Storage, error) {
 			return nil, err
 		}
 	}
-	db, err := OpenDatabase(dbPath, b64Decoded)
+	db, err := GetConnectionPool().Get(dbPath, b64Decoded)
+	if err != nil {
+		log.Println("error opening database: ", err)
+		if db == nil {
+			return nil, err
+		}
+	}
 	storageObject := &Storage{
 		db:          db,
 		path:        dbObject.DbPath,
@@ -522,19 +526,20 @@ func getDbEntry(key []byte, db *badger.DB) ([]byte, error) {
 		if err != nil {
 			return err
 		}
-		err = item.Value(func(val []byte) error {
+		e := item.Value(func(val []byte) error {
 			value = val
 			return nil
 		})
-		return err
+		return e
 	})
 	if err != nil {
 		log.Println("meta get error: ", err)
+		return nil, err
 	}
 	return value, err
 }
 
-func listDatabases() (map[string]*DbObject, error) {
+func listDatabases() (map[string]DbObject, error) {
 	if metaStorage.rotatingKey {
 		return nil, errors.New(errDbRotating)
 	}
@@ -549,7 +554,7 @@ func listDatabases() (map[string]*DbObject, error) {
 			log.Println("Error closing meta db:", err)
 		}
 	}(db)
-	m := make(map[string]*DbObject)
+	m := make(map[string]DbObject)
 	err = db.View(func(txn *badger.Txn) error {
 		iterator := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer iterator.Close()
@@ -557,7 +562,7 @@ func listDatabases() (map[string]*DbObject, error) {
 		for iterator.Seek(prefix); iterator.ValidForPrefix(prefix); iterator.Next() {
 			item := iterator.Item()
 			key := string(item.Key())
-			var value *DbObject
+			var value DbObject
 			valError := item.Value(func(val []byte) error {
 				e := json.Unmarshal(val, &value)
 				return e
@@ -600,7 +605,7 @@ func metaBatchInsert(values *map[string][]byte) error {
 	return wb.Flush()
 }
 
-func batchInsertGeneric(values *map[string][]byte, db *badger.DB) error {
+func batchInsertGeneric(ctx context.Context, values *map[string][]byte, db *badger.DB) error {
 	var err error
 	wb := db.NewWriteBatch()
 	defer wb.Cancel()
@@ -608,6 +613,14 @@ func batchInsertGeneric(values *map[string][]byte, db *badger.DB) error {
 		err = wb.Set([]byte(key), val)
 		if err != nil {
 			log.Println("error writing value to batch: ", err)
+			return err
+		}
+
+		// Check for context cancellation during batch build
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
 	}
 	return wb.Flush()
@@ -641,6 +654,7 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 		return "", nil, errors.New("rotate flag already raised")
 	}
 	var e error
+	ctx := context.Background()
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	metaStorage.db, e = OpenDatabase(metaPath, metaStorage.key)
 	if e != nil {
@@ -696,7 +710,7 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 		return err
 	}
 	err = stream.Orchestrate(context.Background())
-	err = batchInsertGeneric(&values, newDb)
+	err = batchInsertGeneric(ctx, &values, newDb)
 	metaStorage.rotatingKey = false
 	return newMetaFile, newMetaKey, err
 }
@@ -803,20 +817,19 @@ func InsertEntry(dbName string, key string, value []byte) error {
 		return err
 	}
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+	pool := GetConnectionPool()
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return err
 	}
+	defer pool.Release(dbPath)
+
 	err = setDbEntry([]byte(key), value, db)
-	if err != nil {
-		return err
-	}
-	err = CloseDatabase(db)
 	return err
 }
 
@@ -845,15 +858,18 @@ func RemoveEntry(dbName string, key string) error {
 		return err
 	}
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+	pool := GetConnectionPool()
+
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return err
 	}
+	defer pool.Release(dbPath)
 
 	err = db.Update(func(txn *badger.Txn) error {
 		return txn.Delete([]byte(key))
@@ -862,8 +878,6 @@ func RemoveEntry(dbName string, key string) error {
 		return err
 	}
 	_ = writeMetaEvent(EventTypeDelete, "Deleted entry: "+dbName+":"+key)
-
-	err = CloseDatabase(db)
 	return err
 }
 
@@ -877,6 +891,7 @@ func (t *Storage) RemoveEntry(key string) error {
 }
 
 func BatchInsert(dbName string, entries map[string][]byte) error {
+	ctx := context.Background()
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
 		return err
@@ -889,27 +904,29 @@ func BatchInsert(dbName string, entries map[string][]byte) error {
 		return err
 	}
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+
 	var db *badger.DB
+	pool := GetConnectionPool()
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return err
 	}
+	defer pool.Release(dbPath)
 
-	err = batchInsertGeneric(&entries, db)
+	err = batchInsertGeneric(ctx, &entries, db)
 	if err != nil {
 		return err
 	}
-
-	err = CloseDatabase(db)
 	return err
 }
 
 func (t *Storage) BatchInsert(entries *map[string][]byte) error {
-	err := batchInsertGeneric(entries, t.db)
+	ctx := context.Background()
+	err := batchInsertGeneric(ctx, entries, t.db)
 	_ = writeMetaEvent(EventTypeWrite, "Wrote batch data to db: "+t.file)
 	return err
 }
@@ -928,20 +945,19 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	}
 
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+	pool := GetConnectionPool()
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer pool.Release(dbPath)
+
 	value, err := getDbEntry([]byte(key), db)
-	if err != nil {
-		return nil, err
-	}
-	err = CloseDatabase(db)
 	return value, err
 }
 
