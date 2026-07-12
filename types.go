@@ -96,13 +96,18 @@ func GetConnectionPool() *ConnectionPool {
 	return connectionPool
 }
 
-// Shutdown closes all pooled connections gracefully
-func Shutdown() error {
-	globalStateMu.Lock()
-	defer globalStateMu.Unlock()
+// ValidationError represents a validation failure with structured information - ADD THIS NEW TYPE
+type ValidationError struct {
+	Field   string `json:"field"`   // Which field/parameter failed validation
+	Code    int    `json:"code"`    // Numeric error code for categorization
+	Message string `json:"message"` // Human-readable description of the error
+	Wrapped error  `json:"-"`       // Optional underlying error (not serialized to JSON)
+}
 
-	if connectionPool != nil {
-		connectionPool.CloseAll()
+// Error implements the standard error interface - REQUIRED FOR ERROR TYPE
+func (v *ValidationError) Error() string {
+	if v.Wrapped != nil {
+		return fmt.Sprintf("%s: %s (code: %d, wrapped: %v)", v.Field, v.Message, v.Code, v.Wrapped)
 	}
-	return nil
+	return fmt.Sprintf("%s: %s (code: %d)", v.Field, v.Message, v.Code)
 }
