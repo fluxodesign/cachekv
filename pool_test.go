@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -200,7 +201,7 @@ func TestPoolMultiplePaths(t *testing.T) {
 	dbKeys := make(map[int][]byte) // Store keys per-database
 
 	for i := 0; i < numDatabases; i++ {
-		dbPath := path.Join(poolTestStorePath, "test-db-"+string(rune(i)))
+		dbPath := path.Join(poolTestStorePath, "test-db-"+strconv.Itoa(i))
 		key, _ := randomValues(keyLength)
 
 		dbKeys[i] = key // Store the key for this database
@@ -210,13 +211,13 @@ func TestPoolMultiplePaths(t *testing.T) {
 		assert.NotNil(t, dbConnections[i])
 
 		// Write test data to each database
-		err = setDbEntry([]byte("key"), []byte("value-"+string(rune(i))), dbConnections[i])
+		err = setDbEntry([]byte("key"), []byte("value-"+strconv.Itoa(i)), dbConnections[i])
 		assert.Nil(t, err, "failed to write to database %d", i)
 	}
 
 	// Verify all databases have distinct data using stored keys
 	for i := 0; i < numDatabases; i++ {
-		dbPath := path.Join(poolTestStorePath, "test-db-"+string(rune(i)))
+		dbPath := path.Join(poolTestStorePath, "test-db-"+strconv.Itoa(i))
 
 		pool.Release(dbPath)
 
@@ -227,7 +228,7 @@ func TestPoolMultiplePaths(t *testing.T) {
 
 		value, getErr := getDbEntry([]byte("key"), db2)
 		assert.Nil(t, getErr)
-		expectedValue := "value-" + string(rune(i))
+		expectedValue := "value-" + strconv.Itoa(i)
 		assert.Equal(t, []byte(expectedValue), value,
 			"database %d should have distinct data", i)
 
