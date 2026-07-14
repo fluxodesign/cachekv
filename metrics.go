@@ -10,11 +10,16 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
+
+// Metrics collector global storage
+var metricsCollector *SimpleMetricsCollector = nil
+var collectorMu sync.RWMutex
 
 // MetricsCollector interface for pluggable metrics implementation
 type MetricsCollector interface {
@@ -152,6 +157,20 @@ func (m *SimpleMetricsCollector) GetMetrics() Metrics {
 	}
 }
 
+// GetMetricsCollector returns the global metrics collector instance
+func GetMetricsCollector() MetricsCollector {
+	collectorMu.RLock()
+	defer collectorMu.RUnlock()
+	return metricsCollector
+}
+
+// SetMetricsCollector sets the global metrics collector instance
+func SetMetricsCollector(collector *SimpleMetricsCollector) {
+	collectorMu.Lock()
+	defer collectorMu.Unlock()
+	metricsCollector = collector
+}
+
 // validateStorePath validates that the store path exists and is accessible - FIX: Uncomment this
 func validateStorePath(storePath string) error {
 	if _, err := os.Stat(storePath); os.IsNotExist(err) {
@@ -217,7 +236,7 @@ func validateDependencies() error {
 
 // validateEncryptionCapability ensures encryption functions work correctly
 func validateEncryptionCapability() error {
-	_, pubKey, err := readFromStorage(KeyPath)
+	_, _, err := readFromStorage(KeyPath)
 	if err != nil {
 		return &ValidationError{Field: "Encryption", Code: 4300, Message: "could not read public key from storage"}
 	}
@@ -347,7 +366,7 @@ func writeShutdownEvent(ctx context.Context) {
 	if m != nil {
 		lastOpDur := m.(*SimpleMetricsCollector).lastOpDuration.Load()
 		if lastOpDur > 0 {
-			m.RecordLatency(ctx, "shutdown_final_op", lastOpDur)
+			m.RecordLatency(ctx, "shutdown_final_op", time.Duration(lastOpDur))
 		}
 	}
 }

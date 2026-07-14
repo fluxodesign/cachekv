@@ -33,6 +33,9 @@ type DbObject struct {
 	Deleted     int64  `json:"deleted"`
 }
 
+var shutdownWG sync.WaitGroup
+var shutdownFlag int32
+
 type Event struct {
 	Type    EventType `json:"type"`
 	Comment string    `json:"comment"`
