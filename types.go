@@ -52,6 +52,7 @@ const (
 	EventTypeDelete
 	EventTypeUpdate
 	EventTypeConfigChange
+	EventTypeShutdown
 	_
 
 	prefixMetaKey    = "metakey:fxstorage"

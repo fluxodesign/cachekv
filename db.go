@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"os"
@@ -36,6 +37,13 @@ const (
 )
 
 func Startup() {
+	ctx := context.Background()
+
+	// Initialize metrics collector first for startup monitoring
+	metricsCollector = NewSimpleMetricsCollector()
+	startupStart := time.Now()
+
+	log.Println("Starting cachekv storage system...")
 	_, err := os.Stat(StorePath)
 	if err != nil && os.IsNotExist(err) {
 		syscall.Umask(0)
@@ -67,6 +75,24 @@ func Startup() {
 			log.Fatal("error opening meta db: ", err)
 			return
 		}
+	}
+
+	// Perform comprehensive validation after initialization
+	config := DefaultConfig()
+	log.Println("Validating configuration and environment...")
+
+	err = ValidateConfiguration(ctx, config, true) // strict=true for startup
+	if err != nil {
+		log.Printf("Validation warnings: %v\n", err)
+	}
+
+	startupDuration := time.Since(startupStart)
+	metricsCollector.RecordLatency(ctx, "startup_init", startupDuration)
+
+	log.Printf("Startup complete in %v\n", startupDuration)
+	err := writeMetaEvent(EventTypeConfigChange, fmt.Sprintf("System started in %v", startupDuration))
+	if err != nil {
+		return
 	}
 }
 
