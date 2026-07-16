@@ -5,16 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"log"
-	"os"
 	"path"
-	"path/filepath"
-	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/dgraph-io/badger/v4"
 )
 
 // Metrics collector global storage
@@ -169,106 +164,6 @@ func SetMetricsCollector(collector *SimpleMetricsCollector) {
 	collectorMu.Lock()
 	defer collectorMu.Unlock()
 	metricsCollector = collector
-}
-
-// validateStorePath validates that the store path exists and is accessible - FIX: Uncomment this
-func validateStorePath(storePath string) error {
-	if _, err := os.Stat(storePath); os.IsNotExist(err) {
-		return &ValidationError{Field: "StorePath", Code: 4096, Message: "store path does not exist"}
-	}
-
-	info, _ := os.Stat(storePath)
-	if !info.IsDir() {
-		return &ValidationError{Field: "StorePath", Code: 4097, Message: "store path is not a directory"}
-	}
-
-	return nil
-}
-
-// validateKeyPath ensures key storage location is valid and secure
-func validateKeyPath(path string) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		// Key path can be created, but we need parent directory to exist
-		parentDir := filepath.Dir(path)
-		if _, err := os.Stat(parentDir); os.IsNotExist(err) {
-			return &ValidationError{Field: "KeyPath", Code: 4103, Message: "key storage parent directory does not exist"}
-		}
-	}
-
-	info, _ := os.Stat(path)
-	if info != nil && !info.IsDir() {
-		return &ValidationError{Field: "KeyPath", Code: 4104, Message: "key path is not a directory"}
-	}
-
-	return nil
-}
-
-// validatePermissions ensures directories have correct permissions
-func validatePermissions(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-
-	mode := info.Mode()
-	if mode.Perm().String() == "777" || mode.Perm().String() == "0777" {
-		log.Printf("Warning: path %s has overly permissive permissions (777)\n", path)
-	}
-
-	return nil
-}
-
-// validateDependencies ensures required system dependencies are available
-func validateDependencies() error {
-	// Check if Badger DB can be initialized with test options
-	testPath := filepath.Join(os.TempDir(), "cachekv_test_"+strconv.FormatInt(time.Now().UnixNano(), 10))
-	defer os.RemoveAll(testPath)
-
-	opt := badger.DefaultOptions(testPath).WithEncryptionKey(make([]byte, keyLength))
-	db, err := badger.Open(opt)
-	if err != nil {
-		return &ValidationError{Field: "Dependencies", Code: 4200, Message: "Badger DB initialization failed", Wrapped: err}
-	}
-	defer db.Close()
-
-	return nil
-}
-
-// validateEncryptionCapability ensures encryption functions work correctly
-func validateEncryptionCapability() error {
-	_, _, err := readFromStorage(KeyPath)
-	if err != nil {
-		return &ValidationError{Field: "Encryption", Code: 4300, Message: "could not read public key from storage"}
-	}
-
-	// Test encryption/decryption cycle
-	testMessage := []byte("test_encryption")
-	encrypted, err := encryptMessage(testMessage, nil)
-	if err != nil {
-		return &ValidationError{Field: "Encryption", Code: 4301, Message: "encryption failed"}
-	}
-
-	decrypted, err := decryptMessage(encrypted, nil)
-	if err != nil {
-		return &ValidationError{Field: "Encryption", Code: 4302, Message: "decryption failed"}
-	}
-
-	if string(decrypted) != string(testMessage) {
-		return &ValidationError{Field: "Encryption", Code: 4303, Message: "decrypted message does not match original"}
-	}
-
-	return nil
-}
-
-// validateGCConfig checks if Go runtime GC settings are appropriate
-func validateGCConfig() error {
-	gcPercent := debug.SetGCPercent(-1) // Get current value without changing it
-
-	if gcPercent < 20 || gcPercent > 100 {
-		log.Printf("Warning: GC percent is %d, recommended range is 20-100\n", gcPercent)
-	}
-
-	return nil
 }
 
 // Shutdown closes all resources in the correct order with timeout support

@@ -90,7 +90,7 @@ func Startup() {
 	metricsCollector.RecordLatency(ctx, "startup_init", startupDuration)
 
 	log.Printf("Startup complete in %v\n", startupDuration)
-	err := writeMetaEvent(EventTypeConfigChange, fmt.Sprintf("System started in %v", startupDuration))
+	err = writeMetaEvent(EventTypeConfigChange, fmt.Sprintf("System started in %v", startupDuration))
 	if err != nil {
 		return
 	}
@@ -676,14 +676,17 @@ func countRecords(prefix string, db *badger.DB, verbose bool) (int, error) {
 }
 
 func copyMetas() (newPath string, newKey []byte, err error) {
+	ctx := context.Background()
+	startTime := time.Now()
+
 	if metaStorage.rotatingKey {
 		return "", nil, errors.New("rotate flag already raised")
 	}
 	var e error
-	ctx := context.Background()
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	metaStorage.db, e = OpenDatabase(metaPath, metaStorage.key)
 	if e != nil {
+		metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, time.Since(startTime), false)
 		return "", nil, e
 	}
 	defer func(db *badger.DB) {
@@ -694,12 +697,27 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	}(metaStorage.db)
 
 	metaStorage.rotatingKey = true
+
+	itemCount := 0
+	err = metaStorage.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			itemCount++
+		}
+		return nil
+	})
+	if err != nil {
+		log.Println("Error counting items in meta database: ", err)
+	}
+
 	newMetaKey, _ := randomValues(keyLength)
 	metaFileRandom, _ := randomValues(10)
 	newMetaFile := "meta-" + string(metaFileRandom)
 	newDb, err := OpenDatabase(StorePath+newMetaFile, newMetaKey)
 	if err != nil {
 		log.Println("Error opening new meta database: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, time.Since(startTime), false)
 		return "", nil, err
 	}
 	defer func(db *badger.DB) {
@@ -738,6 +756,13 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	err = stream.Orchestrate(context.Background())
 	err = batchInsertGeneric(ctx, &values, newDb)
 	metaStorage.rotatingKey = false
+
+	duration := time.Since(startTime)
+	metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, duration, true)
+	metricsCollector.RecordKeyRotation(metaStorage.file, newMetaFile, itemCount)
+
+	log.Printf("Key rotation complete: %s -> %s (%d items in %v)\n",
+		metaStorage.file, newMetaFile, itemCount, duration)
 	return newMetaFile, newMetaKey, err
 }
 
@@ -767,13 +792,19 @@ func getDbKey(dbName string, dbObject *DbObject) ([]byte, error) {
 }
 
 func CreateDatabase(dbName string, secure bool) error {
+	ctx := context.Background()
+	startTime := time.Now()
+
 	// check first
 	exist, err := databaseExist(dbName)
 	if err != nil {
+		metricsCollector.RecordOperation(ctx, "check", dbName, time.Since(startTime), false)
 		return err
 	}
 	if exist {
-		return errors.New("database already exists")
+		err = errors.New("database already exists")
+		metricsCollector.RecordOperation(ctx, "check", dbName, time.Since(startTime), false)
+		return err
 	}
 	// open db with name and optional key - store the key on keyring
 	dbId, _ := randomValues(fileIdLength)
@@ -783,20 +814,24 @@ func CreateDatabase(dbName string, secure bool) error {
 	if secure {
 		key, secErr := randomValues(keyLength)
 		if secErr != nil {
+			metricsCollector.RecordEncryptionError("key_generation_failed")
 			return secErr
 		}
 		db, secErr = OpenDatabase(dbPath, key)
 		if secErr != nil {
+			metricsCollector.RecordOperation(ctx, "open", dbName, time.Since(startTime), false)
 			return secErr
 		}
 		b64Key := b64Encode(key)
 		secErr = WriteToKeyring(prefixMetaDb+dbName, []byte(b64Key))
 		if secErr != nil {
+			metricsCollector.RecordOperation(ctx, "wrt-keyring", dbName, time.Since(startTime), false)
 			return secErr
 		}
 	} else {
 		db, err = openUnsecuredDb(dbPath)
 		if err != nil {
+			metricsCollector.RecordOperation(ctx, "open", dbName, time.Since(startTime), false)
 			return err
 		}
 	}
@@ -812,9 +847,20 @@ func CreateDatabase(dbName string, secure bool) error {
 	}
 	err = writeMetaDbObject(dbName, &dbObject, false)
 	if err != nil {
+		metricsCollector.RecordOperation(ctx, "wrt-meta", dbName, time.Since(startTime), false)
 		return err
 	}
 	err = CloseDatabase(db)
+	duration := time.Since(startTime)
+	success := err == nil
+
+	metricsCollector.RecordOperation(ctx, "create", dbName, duration, success)
+	if success {
+		metricsCollector.RecordDatabaseCreated(dbName)
+		log.Printf("Database %s created in %v\n", dbName, duration)
+	} else {
+		log.Printf("Failed to create database %s after %v: %v\n", dbName, duration, err)
+	}
 	return err
 }
 
@@ -831,6 +877,14 @@ func databaseExist(dbName string) (bool, error) {
 }
 
 func InsertEntry(dbName string, key string, value []byte) error {
+	ctx := context.Background()
+	startTime := time.Now()
+
+	// Check if we're shutting down
+	if IsShuttingDown() {
+		return errors.New("system is shutting down - operation rejected")
+	}
+
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
 		return err
@@ -856,6 +910,12 @@ func InsertEntry(dbName string, key string, value []byte) error {
 	defer pool.Release(dbPath)
 
 	err = setDbEntry([]byte(key), value, db)
+	duration := time.Since(startTime)
+	success := err == nil
+	metricsCollector.RecordOperation(ctx, "write", dbName, duration, success)
+	if !success {
+		log.Printf("Write operation failed for %s:%s after %v\n", dbName, key, duration)
+	}
 	return err
 }
 
@@ -958,6 +1018,13 @@ func (t *Storage) BatchInsert(entries *map[string][]byte) error {
 }
 
 func GetEntry(dbName string, key string) ([]byte, error) {
+	ctx := context.Background()
+	startTime := time.Now()
+
+	if IsShuttingDown() {
+		return nil, errors.New("system is shutting down - operation rejected")
+	}
+
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
 		return nil, err
@@ -984,6 +1051,10 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	defer pool.Release(dbPath)
 
 	value, err := getDbEntry([]byte(key), db)
+	duration := time.Since(startTime)
+	success := err == nil
+
+	metricsCollector.RecordOperation(ctx, "read", dbName, duration, success)
 	return value, err
 }
 
