@@ -121,16 +121,12 @@ func writeMetaEntry(key string, value []byte) error {
 		return errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		return err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta db: ", err)
-		}
-	}(db)
+	defer pool.Release(metaPath)
 	err = setDbEntry([]byte(key), value, db)
 	return err
 }
@@ -140,16 +136,12 @@ func getMetaEntry(key string) ([]byte, error) {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta db: ", err)
-		}
-	}(db)
+	defer pool.Release(metaPath)
 
 	value := make([]byte, 0)
 	err = db.View(func(txn *badger.Txn) error {
@@ -251,16 +243,12 @@ func WriteToKeyring(key string, value []byte) error {
 		return errors.New(errDbRotating)
 	}
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
-	db, err := OpenDatabase(keyPath, keyStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(keyPath, keyStorage.key)
 	if err != nil {
 		return err
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing key db: ", err)
-		}
-	}(db)
+	defer pool.Release(keyPath)
 	err = setDbEntry([]byte(key), value, db)
 	return err
 }
@@ -270,16 +258,12 @@ func getFromKeyring(key string) ([]byte, error) {
 		return nil, errors.New(errDbRotating)
 	}
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
-	db, err := OpenDatabase(keyPath, keyStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(keyPath, keyStorage.key)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing key db: ", err)
-		}
-	}(db)
+	defer pool.Release(keyPath)
 
 	value := make([]byte, 0)
 	err = db.View(func(txn *badger.Txn) error {
@@ -586,16 +570,12 @@ func listDatabases() (map[string]DbObject, error) {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing meta db:", err)
-		}
-	}(db)
+	defer pool.Release(metaPath)
 	m := make(map[string]DbObject)
 	err = db.View(func(txn *badger.Txn) error {
 		iterator := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -625,16 +605,12 @@ func metaBatchInsert(values *map[string][]byte) error {
 	}
 	var err error
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	metaStorage.db, err = OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	metaStorage.db, err = pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		return err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta database: ", err)
-		}
-	}(metaStorage.db)
+	defer pool.Release(metaPath)
 	wb := metaStorage.db.NewWriteBatch()
 	defer wb.Cancel()
 
@@ -700,17 +676,13 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	}
 	var e error
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	metaStorage.db, e = OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	metaStorage.db, e = pool.Get(metaPath, metaStorage.key)
 	if e != nil {
 		metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, time.Since(startTime), false)
 		return "", nil, e
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing meta database: ", err)
-		}
-	}(metaStorage.db)
+	defer pool.Release(metaPath)
 
 	metaStorage.rotatingKey = true
 
@@ -1109,16 +1081,12 @@ func ListDatabases() ([]string, error) {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta database: ", err)
-		}
-	}(db)
+	defer pool.Release(metaPath)
 	var dbList []string
 	err = db.View(func(txn *badger.Txn) error {
 		iterator := txn.NewIterator(badger.DefaultIteratorOptions)

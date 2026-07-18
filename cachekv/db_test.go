@@ -8,6 +8,7 @@ import (
 	randv2 "math/rand/v2"
 	"os"
 	"path"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,9 @@ func setup() func() {
 	Startup()
 	// teardown
 	return func() {
+		GetConnectionPool().CloseAll()
+		connectionPool = nil
+		connectionPoolOnce = sync.Once{}
 		metaPath := path.Join(metaStorage.path, metaStorage.file)
 		_, err = os.Stat(metaPath)
 		if err == nil {
@@ -89,14 +93,15 @@ func TestDifferentEncryptionKeys(t *testing.T) {
 func TestCopyMetasTwoRecords(t *testing.T) {
 	defer setup()()
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	oldDb, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	oldDb, err := pool.Get(metaPath, metaStorage.key)
+	assert.Nil(t, err)
 	assert.Nil(t, setDbEntry([]byte("prefix:testkey"), []byte("testvalue"), oldDb))
 	assert.Nil(t, setDbEntry([]byte("prefix:testkey2"), []byte("testvalue2"), oldDb))
 	keys, err := countRecords("prefix:", oldDb, true)
 	assert.Nil(t, err)
 	assert.Equal(t, 2, keys)
-	err = CloseDatabase(oldDb)
-	assert.Nil(t, err)
+	pool.Release(metaPath)
 	newPath, newKey, err := copyMetas()
 	newMetaPath := path.Join(metaStorage.path, newPath)
 	newDb, err := OpenDatabase(newMetaPath, newKey)
@@ -134,7 +139,9 @@ func TestCopyMetas(t *testing.T) {
 	err := metaBatchInsert(&values)
 	assert.Nil(t, err)
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	oldDb, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	oldDb, err := pool.Get(metaPath, metaStorage.key)
+	assert.Nil(t, err)
 	records, err := countRecords("prefix:", oldDb, false)
 	assert.Nil(t, err)
 	assert.Equal(t, records, n)
@@ -145,8 +152,7 @@ func TestCopyMetas(t *testing.T) {
 		assert.NotNil(t, value)
 		assert.Equal(t, value, v)
 	}
-	err = CloseDatabase(oldDb)
-	assert.Nil(t, err)
+	pool.Release(metaPath)
 	start = time.Now()
 	newPath, newKey, err := copyMetas()
 	end = time.Now()
@@ -465,17 +471,18 @@ func TestInitReloadingExistingMetafile(t *testing.T) {
 	defer setup()()
 	assert.Nil(t, openMetaDb())
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	metaDb, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	metaDb, err := pool.Get(metaPath, metaStorage.key)
 	assert.Nil(t, err)
 	assert.NotNil(t, metaDb)
-	assert.Nil(t, CloseDatabase(metaDb))
+	pool.Release(metaPath)
 	assert.Nil(t, openKeyDb())
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
-	keyDb, err := OpenDatabase(keyPath, keyStorage.key)
+	keyDb, err := pool.Get(keyPath, keyStorage.key)
 	assert.Nil(t, err)
 	assert.NotNil(t, keyDb)
 	assert.True(t, checkConfig())
-	assert.Nil(t, CloseDatabase(keyDb))
+	pool.Release(keyPath)
 }
 
 func TestGetStorageObject(t *testing.T) {
@@ -486,7 +493,6 @@ func TestGetStorageObject(t *testing.T) {
 	storageObject, err := GetStorageObject("testdb")
 	assert.Nil(t, err)
 	assert.NotNil(t, storageObject)
-	assert.Nil(t, CloseDatabase(storageObject.db))
 	// try to insert data into the database and confirm
 	assert.Nil(t, InsertEntry("testdb", myKey, []byte(myValue)))
 	byteEntry, err := GetEntry("testdb", myKey)

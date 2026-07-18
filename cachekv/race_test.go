@@ -59,6 +59,8 @@ func TestConcurrentGlobalStateAccess(t *testing.T) {
 	go func() {
 		wg.Wait()
 		close(errors)
+		close(results)
+		close(done)
 	}()
 
 	select {
@@ -67,9 +69,6 @@ func TestConcurrentGlobalStateAccess(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("Test timed out after 30 seconds - possible deadlock")
 	}
-
-	close(errors)
-	close(results)
 
 	duration := time.Since(startTime)
 

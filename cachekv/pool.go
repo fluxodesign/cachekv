@@ -14,6 +14,8 @@ type ConnectionPool struct {
 	mu       sync.RWMutex
 	storages map[string]*poolEntry
 	timeout  time.Duration // How long before closing idle connections
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 type poolEntry struct {
@@ -24,9 +26,12 @@ type poolEntry struct {
 
 // NewConnectionPool creates a new connection pool with configurable timeout
 func NewConnectionPool(timeout time.Duration) *ConnectionPool {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &ConnectionPool{
 		storages: make(map[string]*poolEntry),
 		timeout:  timeout,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
@@ -90,13 +95,15 @@ func (p *ConnectionPool) scheduleCleanup(dbPath string) {
 			}
 			delete(p.storages, dbPath)
 		}
-	case <-context.Background().Done():
+	case <-p.ctx.Done():
 		return
 	}
 }
 
-// CloseAll closes all managed connections immediately
+// CloseAll closes all managed connections immediately and cancels pending cleanups
 func (p *ConnectionPool) CloseAll() {
+	p.cancel()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -106,7 +113,6 @@ func (p *ConnectionPool) CloseAll() {
 			if err != nil {
 				log.Printf("Error closing database %s: %v", path, err)
 			}
-			delete(p.storages, path)
 		}
 	}
 

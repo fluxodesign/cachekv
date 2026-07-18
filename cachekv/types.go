@@ -69,11 +69,12 @@ const (
 
 // Global state with mutex protection for thread safety
 var (
-	globalStateMu  sync.RWMutex
-	metaStorage    Storage
-	keyStorage     Storage
-	fxConfig       *Config
-	connectionPool *ConnectionPool
+	globalStateMu      sync.RWMutex
+	metaStorage        Storage
+	keyStorage         Storage
+	fxConfig           *Config
+	connectionPool     *ConnectionPool
+	connectionPoolOnce sync.Once
 )
 
 type EMetaKeyNotFound struct {
@@ -95,11 +96,9 @@ func (e *EMetaKeyNotFound) Unwrap() error {
 
 // GetConnectionPool returns the shared connection pool instance
 func GetConnectionPool() *ConnectionPool {
-	globalStateMu.RLock()
-	defer globalStateMu.RUnlock()
-	if connectionPool == nil {
+	connectionPoolOnce.Do(func() {
 		connectionPool = NewConnectionPool(5 * time.Minute)
-	}
+	})
 	return connectionPool
 }
 
