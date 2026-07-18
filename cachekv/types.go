@@ -39,7 +39,7 @@ var shutdownFlag int32
 type Event struct {
 	Type    EventType `json:"type"`
 	Comment string    `json:"comment"`
-	TSTamp  int64     `json:"tstamp"`
+	TStamp  int64     `json:"tstamp"`
 }
 
 type EventType int
@@ -62,6 +62,9 @@ const (
 	lockDb           = "lock.db"
 	errDbRotating    = "maintenance: rotating key"
 	errDbInactive    = "error: trying to access inactive db"
+
+	// shutdown flag - init as 0 (not shutting down)
+	shutdownFlagDefault int32 = 0
 )
 
 // Global state with mutex protection for thread safety

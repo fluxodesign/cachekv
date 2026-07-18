@@ -239,7 +239,7 @@ func writeShutdownEvent(ctx context.Context) {
 	event := Event{
 		Type:    EventTypeConfigChange,
 		Comment: "System shutdown",
-		TSTamp:  now,
+		TStamp:  now,
 	}
 
 	metaPath := path.Join(metaStorage.path, metaStorage.file)

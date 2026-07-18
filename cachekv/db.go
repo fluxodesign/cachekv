@@ -14,6 +14,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,9 +39,12 @@ const (
 
 func Startup() {
 	ctx := context.Background()
+	atomic.StoreInt32(&shutdownFlag, shutdownFlagDefault)
 
 	// Initialize metrics collector first for startup monitoring
+	collectorMu.Lock()
 	metricsCollector = NewSimpleMetricsCollector()
+	collectorMu.Unlock()
 	startupStart := time.Now()
 
 	log.Println("Starting cachekv storage system...")
@@ -52,6 +56,10 @@ func Startup() {
 			log.Fatal("error creating store dir: ", err)
 			return
 		}
+
+		globalStateMu.Lock()
+		defer globalStateMu.Unlock()
+
 		err = initKeyDb()
 		if err != nil {
 			log.Fatal("error initializing keydb: ", err)
@@ -63,6 +71,9 @@ func Startup() {
 			return
 		}
 	} else {
+		globalStateMu.Lock()
+		defer globalStateMu.Unlock()
+
 		// load up the key db
 		err = openKeyDb()
 		if err != nil {
@@ -145,7 +156,7 @@ func getMetaEntry(key string) ([]byte, error) {
 		item, e := txn.Get([]byte(key))
 		if e != nil {
 			if errors.Is(e, badger.ErrKeyNotFound) ||
-				(e.Error() != "" && e.Error() == "key not found") {
+				(e.Error() != "" && strings.Contains(e.Error(), "key not found")) {
 				e = &EMetaKeyNotFound{
 					Code:    8404,
 					Message: "meta key not found",
@@ -168,7 +179,7 @@ func writeMetaEvent(eventType EventType, comment string) error {
 	event := Event{
 		Type:    eventType,
 		Comment: comment,
-		TSTamp:  now,
+		TStamp:  now,
 	}
 	key := prefixMetaEvent + strconv.FormatInt(now, 10)
 	value, err := json.Marshal(event)
@@ -330,11 +341,10 @@ func initKeyDb() error {
 	if err != nil {
 		return err
 	}
-	extractedKey, err := extractString(hash, keyLength)
+	keyStorage.key, err = deriveKeyFromHash(hash)
 	if err != nil {
-		return err
+		return fmt.Errorf("error deriving key from hash: %v", err)
 	}
-	keyStorage.key = []byte(extractedKey)
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
 	keyStorage.db, err = OpenDatabase(keyPath, keyStorage.key)
 	if err != nil {
@@ -457,6 +467,9 @@ func openMetaDb() error {
 }
 
 func GetStorageObject(dbName string) (*Storage, error) {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+
 	// we need to know 3 things:
 	// 1. does it have an entry in the meta storage?
 	// 2. does it have actual db folder in store path?
@@ -566,6 +579,9 @@ func getDbEntry(key []byte, db *badger.DB) ([]byte, error) {
 }
 
 func listDatabases() (map[string]DbObject, error) {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+
 	if metaStorage.rotatingKey {
 		return nil, errors.New(errDbRotating)
 	}
@@ -806,10 +822,15 @@ func CreateDatabase(dbName string, secure bool) error {
 		metricsCollector.RecordOperation(ctx, "check", dbName, time.Since(startTime), false)
 		return err
 	}
+
+	globalStateMu.RLock()
+	storePath := fxConfig.StorePath
+	globalStateMu.RUnlock()
+
 	// open db with name and optional key - store the key on keyring
 	dbId, _ := randomValues(fileIdLength)
 	dbActualName := dbName + "-" + string(dbId)
-	dbPath := path.Join(fxConfig.StorePath, dbActualName)
+	dbPath := path.Join(storePath, dbActualName)
 	var db *badger.DB
 	if secure {
 		key, secErr := randomValues(keyLength)
@@ -1130,6 +1151,9 @@ func NewStorage(db *badger.DB, path string, file string, key []byte, rotating bo
 }
 
 func ListConfigurations() (*Config, error) {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+
 	if metaStorage.rotatingKey {
 		return nil, errors.New(errDbRotating)
 	}
@@ -1147,6 +1171,9 @@ func ListConfigurations() (*Config, error) {
 }
 
 func UpdateConfigurations(config *Config) error {
+	globalStateMu.Lock()
+	defer globalStateMu.Unlock()
+
 	err := WriteMetaConfig(config)
 	if err == nil {
 		fxConfig = config
