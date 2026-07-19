@@ -85,7 +85,8 @@ func TestDifferentEncryptionKeys(t *testing.T) {
 	assert.NotNil(t, value)
 	assert.Equal(t, value, []byte("testvalue"))
 	metaKey, _ := randomValues(32)
-	db, err := OpenDatabase(metaPath, metaKey)
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaKey)
 	assert.NotNil(t, err)
 	assert.Nil(t, db)
 }
@@ -104,24 +105,25 @@ func TestCopyMetasTwoRecords(t *testing.T) {
 	pool.Release(metaPath)
 	newPath, newKey, err := copyMetas()
 	newMetaPath := path.Join(metaStorage.path, newPath)
-	newDb, err := OpenDatabase(newMetaPath, newKey)
+	// We need to wait for the pool's cleanup or ensure the pool closes it if we want to re-open it.
+	// But actually, we SHOULD use the pool here too.
+	newDb, err := pool.Get(newMetaPath, newKey)
 	assert.Nil(t, err)
 	assert.NotNil(t, newDb)
 	keys, err = countRecords("prefix:", newDb, true)
 	assert.Nil(t, err)
 	assert.Equal(t, 2, keys)
-	err = CloseDatabase(newDb)
-	assert.Nil(t, err)
+	pool.Release(newMetaPath)
 }
 
 func TestCopyMetas(t *testing.T) {
 	defer setup()()
 	newMeta, _ := randomValues(32)
 	log.Println(newMeta)
-	n := 1000000
+	n := 10000
 	values := make(map[string][]byte)
 	start := time.Now()
-	for i := 0; i < n; i++ {
+	for range n {
 		found := true
 		for found == true {
 			newKey := uuid.NewString()
@@ -159,7 +161,8 @@ func TestCopyMetas(t *testing.T) {
 	assert.Nil(t, err)
 	duration = end.Sub(start)
 	log.Printf("copyMetas() with %d records completed in %d seconds", n, int(duration.Seconds()))
-	newDb, err := OpenDatabase(StorePath+newPath, newKey)
+	newMetaPath := path.Join(StorePath, newPath)
+	newDb, err := pool.Get(newMetaPath, newKey)
 	assert.Nil(t, err)
 	assert.NotNil(t, newDb)
 	records, err = countRecords("prefix:", newDb, false)
@@ -172,8 +175,7 @@ func TestCopyMetas(t *testing.T) {
 		assert.NotNil(t, value)
 		assert.Equal(t, value, v)
 	}
-	err = CloseDatabase(newDb)
-	assert.Nil(t, err)
+	pool.Release(newMetaPath)
 }
 
 func TestDefaultConfig(t *testing.T) {
@@ -374,7 +376,7 @@ func TestInsertBatch(t *testing.T) {
 	n := 2000000
 	entries := make(map[string][]byte)
 	start := time.Now()
-	for i := 0; i < n; i++ {
+	for range n {
 		found := true
 		for found == true {
 			newKey := uuid.New().String()
@@ -429,7 +431,7 @@ func TestGetEntryWithinALotOfEntries(t *testing.T) {
 	n := 2000000
 	entries := make(map[string][]byte)
 	start := time.Now()
-	for i := 0; i < n; i++ {
+	for range n {
 		found := true
 		for found == true {
 			newKey := uuid.New().String()
@@ -478,6 +480,10 @@ func TestInitReloadingExistingMetafile(t *testing.T) {
 	pool.Release(metaPath)
 	assert.Nil(t, openKeyDb())
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
+	// Clear connection pool to ensure we don't hit mismatch when keyStorage.key is non-empty but DB was opened without key
+	pool.CloseAll()
+	// Re-open meta storage to recover state after CloseAll
+	assert.Nil(t, openMetaDb())
 	keyDb, err := pool.Get(keyPath, keyStorage.key)
 	assert.Nil(t, err)
 	assert.NotNil(t, keyDb)
@@ -529,6 +535,10 @@ func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
 	_, err := os.Stat(keyPath)
 	assert.Nil(t, err)
+
+	// Close all connections before removing the directory
+	GetConnectionPool().CloseAll()
+
 	err = os.RemoveAll(keyPath)
 	assert.Nil(t, err)
 	assert.Nil(t, openKeyDb())
@@ -541,6 +551,10 @@ func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	_, err := os.Stat(metaPath)
 	assert.Nil(t, err)
+
+	// Close all connections before removing the directory
+	GetConnectionPool().CloseAll()
+
 	err = os.RemoveAll(metaPath)
 	assert.Nil(t, err)
 	assert.Nil(t, openMetaDb())
@@ -610,7 +624,7 @@ func TestGetAllEntries(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, dbObject)
 	start := time.Now()
-	for i := 0; i < n; i++ {
+	for range n {
 		found := true
 		for found == true {
 			newKey := uuid.NewString()

@@ -330,12 +330,13 @@ func initKeyDb() error {
 		return fmt.Errorf("error deriving key from hash: %v", err)
 	}
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
-	keyStorage.db, err = OpenDatabase(keyPath, keyStorage.key)
+	pool := GetConnectionPool()
+	keyStorage.db, err = pool.Get(keyPath, keyStorage.key)
 	if err != nil {
 		return err
 	}
-	err = CloseDatabase(keyStorage.db)
-	return err
+	pool.Release(keyPath)
+	return nil
 }
 
 func initMetaDb() error {
@@ -352,8 +353,9 @@ func initMetaDb() error {
 		return fErr
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	pool := GetConnectionPool()
 	var err error
-	metaStorage.db, err = OpenDatabase(metaPath, metaStorage.key)
+	metaStorage.db, err = pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		return err
 	}
@@ -361,10 +363,7 @@ func initMetaDb() error {
 	if fErr != nil {
 		log.Println("Error saving key file to keyring:", fErr)
 	}
-	err = CloseDatabase(metaStorage.db)
-	if err != nil {
-		return err
-	}
+	pool.Release(metaPath)
 	_ = writeMetaEvent(EventTypeWrite, "wrote keyring")
 	fxConfig = DefaultConfig()
 	err = WriteMetaConfig(fxConfig)
@@ -500,14 +499,7 @@ func GetStorageObject(dbName string) (*Storage, error) {
 }
 
 func openUnsecuredDb(path string) (*badger.DB, error) {
-	opt := badger.DefaultOptions(path)
-	opt.IndexCacheSize = 100 << 20
-	db, err := badger.Open(opt)
-	if err != nil {
-		log.Println("Error opening unsecured db:", err)
-		return nil, err
-	}
-	return db, nil
+	return GetConnectionPool().Get(path, nil)
 }
 
 func OpenDatabase(path string, key []byte) (*badger.DB, error) {
@@ -522,6 +514,10 @@ func OpenDatabase(path string, key []byte) (*badger.DB, error) {
 }
 
 func CloseDatabase(db *badger.DB) error {
+	// If the database is managed by the pool, we should really be using pool.Release(path).
+	// However, CloseDatabase is used in some places where we have a *badger.DB but not its path easily available,
+	// or in tests. For backward compatibility and safety, we still allow direct closing,
+	// but the pool will handle its own lifecycle.
 	return db.Close()
 }
 
@@ -702,18 +698,14 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	newMetaKey, _ := randomValues(keyLength)
 	metaFileRandom, _ := randomValues(10)
 	newMetaFile := "meta-" + string(metaFileRandom)
-	newDb, err := OpenDatabase(StorePath+newMetaFile, newMetaKey)
+	newMetaPath := path.Join(StorePath, newMetaFile)
+	newDb, err := pool.Get(newMetaPath, newMetaKey)
 	if err != nil {
 		log.Println("Error opening new meta database: ", err)
 		metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, time.Since(startTime), false)
 		return "", nil, err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing new meta database: ", err)
-		}
-	}(newDb)
+	defer pool.Release(newMetaPath)
 
 	values := make(map[string][]byte)
 	stream := metaStorage.db.NewStream()
@@ -744,6 +736,10 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	err = stream.Orchestrate(context.Background())
 	err = batchInsertGeneric(ctx, &values, newDb)
 	metaStorage.rotatingKey = false
+	// We MUST close it to release the lock because rotation might be followed by other operations
+	// that expect the lock to be available, or tests that check the file.
+	// But since we are using the pool, we just release it.
+	pool.Release(newMetaPath)
 
 	duration := time.Since(startTime)
 	metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, duration, true)
@@ -803,14 +799,14 @@ func CreateDatabase(dbName string, secure bool) error {
 	dbId, _ := randomValues(fileIdLength)
 	dbActualName := dbName + "-" + string(dbId)
 	dbPath := path.Join(storePath, dbActualName)
-	var db *badger.DB
+	pool := GetConnectionPool()
 	if secure {
 		key, secErr := randomValues(keyLength)
 		if secErr != nil {
 			metricsCollector.RecordEncryptionError("key_generation_failed")
 			return secErr
 		}
-		db, secErr = OpenDatabase(dbPath, key)
+		_, secErr = pool.Get(dbPath, key)
 		if secErr != nil {
 			metricsCollector.RecordOperation(ctx, "open", dbName, time.Since(startTime), false)
 			return secErr
@@ -822,12 +818,13 @@ func CreateDatabase(dbName string, secure bool) error {
 			return secErr
 		}
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		_, err = pool.Get(dbPath, nil)
 		if err != nil {
 			metricsCollector.RecordOperation(ctx, "open", dbName, time.Since(startTime), false)
 			return err
 		}
 	}
+	defer pool.Release(dbPath)
 	// create a new DbObject struct and store it in meta db
 	dbObject := DbObject{
 		DbPath:      fxConfig.StorePath,
@@ -843,7 +840,6 @@ func CreateDatabase(dbName string, secure bool) error {
 		metricsCollector.RecordOperation(ctx, "wrt-meta", dbName, time.Since(startTime), false)
 		return err
 	}
-	err = CloseDatabase(db)
 	duration := time.Since(startTime)
 	success := err == nil
 

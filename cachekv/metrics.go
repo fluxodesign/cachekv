@@ -243,12 +243,13 @@ func writeShutdownEvent(ctx context.Context) {
 	}
 
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		log.Printf("Warning: could not open meta database for shutdown event: %v\n", err)
 		return
 	}
-	defer db.Close()
+	defer pool.Release(metaPath)
 
 	key := prefixMetaEvent + strconv.FormatInt(now, 10)
 	value, _ := json.Marshal(event)

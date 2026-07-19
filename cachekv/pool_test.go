@@ -357,7 +357,7 @@ func TestPoolStressTest(t *testing.T) {
 
 	startTime := time.Now()
 
-	for i := 0; i < numOperations; i++ {
+	for i := range numOperations {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
