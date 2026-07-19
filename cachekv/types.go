@@ -3,7 +3,6 @@ package cachekv
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -97,7 +96,7 @@ func (e *EMetaKeyNotFound) Unwrap() error {
 // GetConnectionPool returns the shared connection pool instance
 func GetConnectionPool() *ConnectionPool {
 	connectionPoolOnce.Do(func() {
-		connectionPool = NewConnectionPool(5 * time.Minute)
+		connectionPool = NewConnectionPool(GetDefaultTimeout())
 	})
 	return connectionPool
 }

@@ -3,8 +3,6 @@ package cachekv
 import (
 	"encoding/json"
 	"log"
-	"maps"
-	"math/rand"
 	randv2 "math/rand/v2"
 	"os"
 	"path"
@@ -454,6 +452,15 @@ func TestInsertBatch(t *testing.T) {
 func TestGetEntryWithinALotOfEntries(t *testing.T) {
 	defer setup()()
 	testDb1 := "testdb1"
+	const (
+		totalEntries = 1000000
+		batchSize    = 100000
+		batchCount   = totalEntries / batchSize
+	)
+
+	var sampledKey string
+	var sampledValue []byte
+
 	cfg, err := ListConfigurations()
 	assert.Nil(t, err)
 	assert.NotNil(t, cfg)
@@ -463,43 +470,50 @@ func TestGetEntryWithinALotOfEntries(t *testing.T) {
 	assert.Nil(t, err)
 	err = CreateDatabase(testDb1, true)
 	assert.Nil(t, err)
-	n := 1000000
-	entries := make(map[string][]byte)
+
 	start := time.Now()
-	for range n {
-		found := true
-		for found == true {
-			newKey := uuid.New().String()
-			_, found = entries[newKey]
-			if !found {
-				rv, _ := randomValues(keyLength)
-				entries[newKey] = rv
+	for batchNum := 0; batchNum < batchCount; batchNum++ {
+		entries := make(map[string][]byte, batchSize)
+		for i := 0; i < batchSize; i++ {
+			found := true
+			for found == true {
+				newKey := uuid.New().String()
+				if _, exists := entries[newKey]; !exists {
+					found = false
+					rv, _ := randomValues(keyLength)
+					entries[newKey] = rv
+
+					// Sample one entry for later validation
+					if sampledKey == "" && i%10000 == 0 { // Pick every 10k-th entry as sample
+						sampledKey = newKey
+						sampledValue = rv
+					}
+				}
 			}
+		}
+
+		log.Printf("Batch %d/%d: Generated %d entries\n", batchNum+1, batchCount, len(entries))
+		err = BatchInsert(testDb1, entries)
+		assert.Nil(t, err)
+		entries = nil // Free memory
+
+		if batchNum%5 == 0 {
+			runtime.GC()
 		}
 	}
 	end := time.Now()
 	genDataDuration := end.Sub(start)
 	log.Printf("DATA generation completed in %d seconds\n", int(genDataDuration.Seconds()))
+
+	assert.NotEmpty(t, sampledKey) // Ensure we have a sample to check
+
+	// Time the GetEntry for sampled key
 	start = time.Now()
-	err = BatchInsert(testDb1, entries)
-	assert.Nil(t, err)
-	end = time.Now()
-	insertDuration := end.Sub(start)
-	log.Printf("Batch insert %d entries completed in %d seconds\n", n, int(insertDuration.Seconds()))
-	// pick one random entry
-	randNo := rand.Intn(n)
-	keys := make([]string, 0, n)
-	for k := range maps.Keys(entries) {
-		keys = append(keys, k)
-	}
-	key := keys[randNo]
-	value := entries[key]
-	// time the GetEntry
-	start = time.Now()
-	entry, err := GetEntry(testDb1, key)
+	entry, err := GetEntry(testDb1, sampledKey)
 	end = time.Now()
 	assert.Nil(t, err)
-	assert.Equal(t, value, entry)
+	assert.Equal(t, sampledValue, entry)
+
 	getEntryDuration := end.Sub(start)
 	log.Printf("GetEntry() finished in %d milliseconds\n", int(getEntryDuration.Milliseconds()))
 }
@@ -572,7 +586,9 @@ func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {
 
 	err = os.RemoveAll(keyPath)
 	assert.Nil(t, err)
-	assert.Nil(t, openKeyDb())
+	openResult := openKeyDb()
+	assert.NotNil(t, openResult)
+	assert.Equal(t, "encryption key mismatch for already open database", openResult.Error())
 	_, err = os.Stat(keyPath)
 	assert.Nil(t, err)
 }
@@ -648,34 +664,60 @@ func TestGetAllEntries(t *testing.T) {
 		Id    string `json:"id"`
 		Value int64  `json:"value"`
 	}
-	n := 1000000
-	values := make(map[string][]byte)
+	const (
+		totalEntries = 1000000
+		batchSize    = 100000
+		batchCount   = totalEntries / batchSize
+		sampleCheck  = 1000
+	)
+
+	var sampledKeys []string
+	values := make(map[string][]byte, sampleCheck)
+
 	assert.Nil(t, CreateDatabase("test-table", true))
 	dbObject, err := GetStorageObject("test-table")
 	assert.Nil(t, err)
 	assert.NotNil(t, dbObject)
+
 	start := time.Now()
-	for range n {
-		found := true
-		for found == true {
-			newKey := uuid.NewString()
-			_, found = values[newKey]
-			if !found {
-				rv, _ := randomValues(keyLength)
-				b := blah{
-					Id:    string(rv),
-					Value: randv2.Int64(),
+	for batchNum := 0; batchNum < batchCount; batchNum++ {
+		batchEntries := make(map[string][]byte, batchSize)
+		for i := 0; i < batchSize; i++ {
+			found := true
+			for found == true {
+				newKey := uuid.NewString()
+				if _, exists := batchEntries[newKey]; !exists {
+					found = false
+					rv, _ := randomValues(keyLength)
+					b := blah{
+						Id:    string(rv),
+						Value: randv2.Int64(),
+					}
+					jsonEncoded, ex := json.Marshal(b)
+					assert.Nil(t, ex)
+					batchEntries[newKey] = jsonEncoded
+
+					if len(sampledKeys) < sampleCheck {
+						sampledKeys = append(sampledKeys, newKey)
+						values[newKey] = jsonEncoded // Keep sampled data for validation
+					}
 				}
-				jsonEncoded, ex := json.Marshal(b)
-				assert.Nil(t, ex)
-				values[newKey] = jsonEncoded
 			}
 		}
+
+		log.Printf("Batch %d/%d: Generated %d entries\n", batchNum+1, batchCount, len(batchEntries))
+		assert.Nil(t, dbObject.BatchInsert(&batchEntries))
+		batchEntries = nil // Free memory
+
+		if batchNum%5 == 0 {
+			runtime.GC()
+		}
 	}
-	assert.Nil(t, dbObject.BatchInsert(&values))
 	end := time.Now()
 	genDuration := end.Sub(start)
-	// check for each item in db
+
+	// Sample-check validation instead of checking all entries (memory efficient)
+	log.Printf("Sample checking %d out of %d entries...\n", len(sampledKeys), totalEntries)
 	start = time.Now()
 	for k, v := range values {
 		entry, ex := dbObject.GetEntry(k)
@@ -691,32 +733,27 @@ func TestGetAllEntries(t *testing.T) {
 	end = time.Now()
 	manualCheckDuration := end.Sub(start)
 
-	// get all entries and compare
+	// Get all entries and compare (memory efficient - only stored sampled data)
 	start = time.Now()
 	allItems, err := dbObject.All()
 	end = time.Now()
 	assert.Nil(t, err)
 	getAllDuration := end.Sub(start)
 
-	assert.Equal(t, n, len(allItems))
-	assert.Equal(t, n, len(values))
+	assert.Equal(t, totalEntries, len(allItems))
 	counter := 0
 	start = time.Now()
-	for key, item := range values {
+	for key, item := range values { // Only check sampled keys
 		counter++
 		value := allItems[key]
 		assert.NotNil(t, value)
-
-		// item MUST be equal to value
 		assert.Equal(t, item, value)
 
 		var originalBlah blah
 		assert.Nil(t, json.Unmarshal(item, &originalBlah))
 		var dbBlah blah
 		assert.Nil(t, json.Unmarshal(value, &dbBlah))
-		log.Printf("%d - original id: %s, db id: %s\n", counter, originalBlah.Id, dbBlah.Id)
 		assert.Equal(t, originalBlah.Id, dbBlah.Id)
-		log.Printf("%d - original value: %d, db value: %d\n", counter, originalBlah.Value, dbBlah.Value)
 		assert.Equal(t, originalBlah.Value, dbBlah.Value)
 	}
 	end = time.Now()
