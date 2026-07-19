@@ -396,6 +396,12 @@ func openKeyDb() error {
 		return err
 	}
 	keyStorage.key = []byte(extractedKey)
+	pool := GetConnectionPool()
+	keyStorage.db, err = pool.Get(keyPath, keyStorage.key)
+	if err != nil {
+		return err
+	}
+	pool.Release(keyPath)
 	return nil
 }
 
@@ -433,10 +439,17 @@ func openMetaDb() error {
 		metaStorage.file = latestMetaName
 		key, e := getFromKeyring(prefixMetaKey)
 		if e != nil {
-			log.Println("error reading keyring for meta key: ", err)
-			return err
+			log.Println("error reading keyring for meta key: ", e)
+			return e
 		}
 		metaStorage.key = key
+		metaPath := path.Join(metaStorage.path, metaStorage.file)
+		pool := GetConnectionPool()
+		metaStorage.db, err = pool.Get(metaPath, metaStorage.key)
+		if err != nil {
+			return err
+		}
+		pool.Release(metaPath)
 	} else {
 		err = initMetaDb()
 		if err != nil {

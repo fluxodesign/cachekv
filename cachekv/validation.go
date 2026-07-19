@@ -170,7 +170,7 @@ func validateDependencies() error {
 	testPath := filepath.Join(os.TempDir(), "cachekv_test_"+strconv.FormatInt(time.Now().UnixNano(), 10))
 	defer os.RemoveAll(testPath)
 
-	opt := badger.DefaultOptions(testPath).WithEncryptionKey(make([]byte, keyLength))
+	opt := badger.DefaultOptions(testPath)
 	db, err := badger.Open(opt)
 	if err != nil {
 		return &ValidationError{Field: "Dependencies", Code: 4200, Message: "Badger DB initialization failed"}

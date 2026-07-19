@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,6 +21,8 @@ type ConnectionPool struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
+
+const defaultPoolTimeout = 30 * time.Second
 
 type poolEntry struct {
 	db         *badger.DB
@@ -35,6 +39,17 @@ func NewConnectionPool(timeout time.Duration) *ConnectionPool {
 		ctx:      ctx,
 		cancel:   cancel,
 	}
+}
+
+// GetDefaultTimeout returns the configured timeout based on environment
+func GetDefaultTimeout() time.Duration {
+	if envTimeout := os.Getenv("POOL_TIMEOUT_MS"); envTimeout != "" {
+		val, err := strconv.Atoi(envTimeout)
+		if err == nil && val > 0 {
+			return time.Duration(val) * time.Millisecond
+		}
+	}
+	return defaultPoolTimeout
 }
 
 // Get retrieves or creates a database connection for the given path and key
