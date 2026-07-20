@@ -200,7 +200,7 @@ func TestPoolMultiplePaths(t *testing.T) {
 	dbConnections := make([]*badger.DB, numDatabases)
 	dbKeys := make(map[int][]byte) // Store keys per-database
 
-	for i := 0; i < numDatabases; i++ {
+	for i := range numDatabases {
 		dbPath := path.Join(poolTestStorePath, "test-db-"+strconv.Itoa(i))
 		key, _ := randomValues(keyLength)
 
@@ -216,7 +216,7 @@ func TestPoolMultiplePaths(t *testing.T) {
 	}
 
 	// Verify all databases have distinct data using stored keys
-	for i := 0; i < numDatabases; i++ {
+	for i := range numDatabases {
 		dbPath := path.Join(poolTestStorePath, "test-db-"+strconv.Itoa(i))
 
 		pool.Release(dbPath)
