@@ -125,7 +125,7 @@ func (p *ConnectionPool) scheduleCleanup(dbPath string) {
 		defer p.mu.Unlock()
 
 		entry := p.storages[dbPath]
-		if entry != nil && !entry.db.IsClosed() && time.Since(entry.lastAccess) >= p.timeout {
+		if entry != nil && !entry.db.IsClosed() && entry.refCount == 0 && time.Since(entry.lastAccess) >= p.timeout {
 			err := entry.db.Close()
 			if err != nil {
 				log.Printf("Error closing database %s: %v", dbPath, err)

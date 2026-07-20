@@ -385,9 +385,9 @@ func TestInsertBatch(t *testing.T) {
 	var sampledKeys []string
 	start := time.Now()
 
-	for batchNum := 0; batchNum < batchCount; batchNum++ {
+	for batchNum := range batchCount {
 		entries := make(map[string][]byte, batchSize)
-		for i := 0; i < batchSize; i++ {
+		for range batchSize {
 			found := true
 			for found == true {
 				newKey := uuid.New().String()
@@ -636,6 +636,7 @@ func TestBatchInsert(t *testing.T) {
 				}
 				jsonEncoded, ex := json.Marshal(b)
 				assert.Nil(t, ex)
+				log.Printf("-- generated %s...\n", newKey)
 				generated[newKey] = jsonEncoded
 			}
 		}
