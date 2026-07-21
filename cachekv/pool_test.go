@@ -21,32 +21,42 @@ var (
 func poolSetup() func() {
 	// Clean up any previous test artifacts
 	if _, statErr := os.Stat(poolTestStorePath); !os.IsNotExist(statErr) {
+		// First, close all connections to allow Badger to finish writes
+		if pool := GetConnectionPool(); pool != nil {
+			pool.CloseAll()                    // ⚡ Wait for background goroutines to complete
+			time.Sleep(100 * time.Millisecond) // Small buffer for cleanup
+		}
+
 		err := os.RemoveAll(poolTestStorePath)
 		if err != nil {
 			log.Println("Error removing pool test store: ", err)
 			return nil
 		}
 	}
-	if _, statErr := os.Stat(poolKeyPath); !os.IsNotExist(statErr) {
-		err := os.RemoveAll(poolKeyPath)
-		if err != nil {
-			log.Println("Error removing pool key path: ", err)
-			return nil
-		}
-	}
+
 	return func() {
+		// ⚡ CRITICAL: Close connections BEFORE deleting directories
+		if pool := GetConnectionPool(); pool != nil {
+			pool.CloseAll() // Ensures all Badger DBs are fully closed
+		}
+
+		time.Sleep(200 * time.Millisecond) // Allow background tasks to finish
+
 		metaPath := path.Join(metaStorage.path, metaStorage.file)
 		if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
-			err := os.RemoveAll(metaPath)
-			if err != nil {
-				return
+			if err := os.RemoveAll(metaPath); err != nil {
+				log.Println("error removing test db file: ", err)
 			}
 		}
+
+		if _, err := os.Stat(KeyPath); !os.IsNotExist(err) {
+			if e := os.RemoveAll(KeyPath); e != nil {
+				log.Println("error removing pool key path: ", e)
+			}
+		}
+
 		if err := os.RemoveAll(poolTestStorePath); err != nil {
 			log.Println("error removing pool test store: ", err)
-		}
-		if err := os.RemoveAll(poolKeyPath); err != nil {
-			log.Println("error removing pool key path: ", err)
 		}
 	}
 }
@@ -125,11 +135,10 @@ func TestPoolConnectionReuse(t *testing.T) {
 
 func TestPoolConcurrentGetRelease(t *testing.T) {
 	defer poolSetup()()
-	var err error
 	StorePath = poolTestStorePath
 	KeyPath = poolKeyPath
 
-	err = genKeypair()
+	err := genKeypair()
 	assert.Nil(t, err)
 
 	pool := GetConnectionPool()
@@ -144,12 +153,12 @@ func TestPoolConcurrentGetRelease(t *testing.T) {
 
 	startTime := time.Now()
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 
-			for j := 0; j < iterations; j++ {
+			for j := range iterations {
 				db, e := pool.Get(dbPath, key)
 				if e != nil {
 					errors <- e
@@ -170,6 +179,7 @@ func TestPoolConcurrentGetRelease(t *testing.T) {
 
 	wg.Wait()
 	close(errors)
+	time.Sleep(100 * time.Millisecond)
 
 	duration := time.Since(startTime)
 	log.Printf("Concurrent test completed in %v\n", duration)

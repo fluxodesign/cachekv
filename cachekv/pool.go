@@ -146,12 +146,27 @@ func (p *ConnectionPool) CloseAll() {
 
 	for path, entry := range p.storages {
 		if !entry.db.IsClosed() {
-			err := entry.db.Close()
+			// ⚡ Add a small retry mechanism for graceful close
+			maxRetries := 3
+			var err error
+			for range maxRetries {
+				err = entry.db.Close()
+				if err == nil {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+
 			if err != nil {
 				log.Printf("Error closing database %s: %v", path, err)
+			} else {
+				log.Printf("Successfully closed connection for %s", path)
 			}
 		}
 	}
 
 	p.storages = make(map[string]*poolEntry)
+
+	// ⚡ Small delay to ensure all filesystem operations complete
+	time.Sleep(100 * time.Millisecond)
 }
