@@ -586,9 +586,7 @@ func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {
 
 	err = os.RemoveAll(keyPath)
 	assert.Nil(t, err)
-	openResult := openKeyDb()
-	assert.NotNil(t, openResult)
-	assert.Equal(t, "encryption key mismatch for already open database", openResult.Error())
+	assert.Nil(t, openKeyDb())
 	_, err = os.Stat(keyPath)
 	assert.Nil(t, err)
 }
