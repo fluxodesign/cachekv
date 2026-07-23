@@ -428,10 +428,7 @@ func TestInsertBatch(t *testing.T) {
 	storageObject, err := GetStorageObject(testDb1)
 	assert.Nil(t, err)
 	assert.NotNil(t, storageObject)
-	defer func() {
-		err = CloseDatabase(storageObject.db)
-		assert.Nil(t, err)
-	}()
+	defer storageObject.Close()
 
 	records, err := countRecords("", storageObject.db, false)
 	assert.Nil(t, err)
@@ -544,6 +541,7 @@ func TestGetStorageObject(t *testing.T) {
 	storageObject, err := GetStorageObject("testdb")
 	assert.Nil(t, err)
 	assert.NotNil(t, storageObject)
+	defer storageObject.Close()
 	// try to insert data into the database and confirm
 	assert.Nil(t, InsertEntry("testdb", myKey, []byte(myValue)))
 	byteEntry, err := GetEntry("testdb", myKey)
@@ -560,6 +558,7 @@ func TestDbObjectInsertEntry(t *testing.T) {
 	storageObject, err := GetStorageObject("testdb")
 	assert.Nil(t, err)
 	assert.NotNil(t, storageObject)
+	defer storageObject.Close()
 	assert.Nil(t, storageObject.InsertEntry(myKey, []byte(myValue)))
 	byteEntry, err := storageObject.GetEntry(myKey)
 	assert.Nil(t, err)
@@ -633,6 +632,53 @@ func TestKeyDbReopensAfterRestart(t *testing.T) {
 	assert.Equal(t, string(dataValue), string(getValue))
 }
 
+// TestGetStorageObjectDoesNotLeakPoolRef is a regression test for the C2 bug:
+// GetStorageObject increments the pool's refCount, so every caller that discards
+// the handle (e.g. databaseExist) must release it. Otherwise refCount grows without
+// bound and scheduleCleanup can never reclaim the connection. Here we run several
+// existence checks, then acquire a single handle and assert the pool holds exactly
+// one reference — proving all earlier checks released theirs.
+func TestGetStorageObjectDoesNotLeakPoolRef(t *testing.T) {
+	defer setup()()
+
+	assert.Nil(t, CreateDatabase("leaktest", true))
+	dbObject, err := getMetaDbObject("leaktest")
+	assert.Nil(t, err)
+	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+
+	// Repeated existence checks must not accumulate references.
+	for range 5 {
+		exist, e := databaseExist("leaktest")
+		assert.Nil(t, e)
+		assert.True(t, exist)
+	}
+
+	// One live handle: refCount must be exactly 1, not 1 + leaked refs.
+	so, err := GetStorageObject("leaktest")
+	assert.Nil(t, err)
+	assert.NotNil(t, so)
+
+	pool := GetConnectionPool()
+	pool.mu.RLock()
+	entry := pool.storages[dbPath]
+	pool.mu.RUnlock()
+	if assert.NotNil(t, entry) {
+		assert.Equal(t, 1, entry.refCount)
+	}
+
+	so.Close()
+
+	// After closing the only handle, the reference must drop back to zero.
+	pool.mu.RLock()
+	entry = pool.storages[dbPath]
+	rc := 0
+	if entry != nil {
+		rc = entry.refCount
+	}
+	pool.mu.RUnlock()
+	assert.Equal(t, 0, rc)
+}
+
 func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
 	defer setup()()
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
@@ -662,6 +708,7 @@ func TestBatchInsert(t *testing.T) {
 	dbObject, err := GetStorageObject("test-table")
 	assert.Nil(t, err)
 	assert.NotNil(t, dbObject)
+	defer dbObject.Close()
 	start := time.Now()
 	for range n {
 		found := true
@@ -719,6 +766,7 @@ func TestGetAllEntries(t *testing.T) {
 	dbObject, err := GetStorageObject("test-table")
 	assert.Nil(t, err)
 	assert.NotNil(t, dbObject)
+	defer dbObject.Close()
 
 	start := time.Now()
 	for batchNum := 0; batchNum < batchCount; batchNum++ {

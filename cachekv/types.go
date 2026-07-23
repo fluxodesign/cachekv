@@ -13,6 +13,11 @@ type Storage struct {
 	file        string
 	key         []byte
 	rotatingKey bool
+	// poolKey is the exact key this handle acquired from the connection pool
+	// (the dbPath passed to pool.Get). Close releases that reference. It is
+	// empty when the handle is not pool-managed (e.g. built via NewStorage),
+	// in which case Close is a no-op.
+	poolKey string
 }
 
 type Config struct {

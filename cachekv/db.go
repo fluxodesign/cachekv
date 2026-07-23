@@ -506,6 +506,8 @@ func GetStorageObject(dbName string) (*Storage, error) {
 		file:        dbObject.DbFile,
 		key:         dbKey,
 		rotatingKey: false,
+		// dbPath is exactly the key used for pool.Get above; Close releases it.
+		poolKey: dbPath,
 	}
 	return storageObject, nil
 }
@@ -866,7 +868,9 @@ func CreateDatabase(dbName string, secure bool) error {
 }
 
 func databaseExist(dbName string) (bool, error) {
-	_, err := GetStorageObject(dbName)
+	// This is only an existence check; it doesn't keep the handle, so release the
+	// pool reference immediately rather than pinning the connection forever.
+	so, err := GetStorageObject(dbName)
 	if err != nil {
 		var metaKeyNotFound *EMetaKeyNotFound
 		if errors.As(err, &metaKeyNotFound) {
@@ -874,6 +878,7 @@ func databaseExist(dbName string) (bool, error) {
 		}
 		return false, err
 	}
+	so.Close()
 	return true, nil
 }
 
@@ -918,6 +923,19 @@ func InsertEntry(dbName string, key string, value []byte) error {
 		log.Printf("Write operation failed for %s:%s after %v\n", dbName, key, duration)
 	}
 	return err
+}
+
+// Close releases this handle's connection-pool reference. Callers that obtain a
+// *Storage from GetStorageObject must call Close (typically via defer) when done,
+// otherwise the connection stays pinned and the pool can never reclaim it. It is
+// safe to call on a handle that is not pool-managed (poolKey == ""), and safe to
+// call more than once.
+func (t *Storage) Close() {
+	if t.poolKey == "" {
+		return
+	}
+	GetConnectionPool().Release(t.poolKey)
+	t.poolKey = ""
 }
 
 func (t *Storage) InsertEntry(key string, value []byte) error {
