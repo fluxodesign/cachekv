@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	mrand "math/rand"
 	"os"
 	"path"
 	"strconv"
@@ -162,41 +161,6 @@ func hashFile(path string) (string, error) {
 	byteHash := hash.Sum(nil)
 	strHash := hex.EncodeToString(byteHash)
 	return strHash, nil
-}
-
-func extractString(source string, intendedLength int) (string, error) {
-	var paddingChars = []rune("#$%&^*0@!")
-	if intendedLength <= 0 {
-		return "", errors.New("invalid intended length, you are asking for the impossible")
-	}
-	if len(source) < intendedLength {
-		padding := make([]rune, intendedLength-len(source))
-		for i := range padding {
-			padding[i] = paddingChars[mrand.Intn(len(paddingChars))]
-		}
-		return source + string(padding), nil
-	}
-	return source[:intendedLength], nil
-}
-
-// deriveKeyFromPrivateKey generates a secure 32-byte key from EC private key bytes
-func deriveKeyFromPrivateKey(privateKey *ecdsa.PrivateKey) ([]byte, error) {
-	// Extract raw private scalar (cryptographically secure source)
-	privateBytes := privateKey.D.Bytes()
-
-	// Hash the private bytes to produce fixed-length output suitable for encryption keys
-	hash := sha256.Sum256(privateBytes)
-	return hash[:], nil
-}
-
-// generateSecureKey creates a cryptographically random key of specified length
-func generateSecureKey(length int) ([]byte, error) {
-	key := make([]byte, length)
-	_, err := rand.Read(key)
-	if err != nil {
-		return nil, err
-	}
-	return key, nil
 }
 
 // deriveKeyFromHash generates a secure 32-byte key from hash bytes

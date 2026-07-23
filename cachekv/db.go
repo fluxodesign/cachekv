@@ -391,11 +391,10 @@ func openKeyDb() error {
 	if err != nil {
 		return err
 	}
-	extractedKey, err := extractString(hash, keyLength)
+	keyStorage.key, err = deriveKeyFromHash(hash)
 	if err != nil {
 		return err
 	}
-	keyStorage.key = []byte(extractedKey)
 	pool := GetConnectionPool()
 	keyStorage.db, err = pool.Get(keyPath, keyStorage.key)
 	if err != nil {

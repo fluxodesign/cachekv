@@ -591,6 +591,48 @@ func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {
 	assert.Nil(t, err)
 }
 
+// TestKeyDbReopensAfterRestart is a regression test for the C1 key-derivation bug:
+// initKeyDb and openKeyDb must derive the same keyring encryption key, otherwise the
+// key DB (and every secure database's key) becomes unreadable after a normal restart.
+// It writes a secure value, simulates a process restart (drops the connection-pool
+// singleton but leaves every file on disk), reopens the key DB against the existing
+// lock.db, and reads the value back.
+func TestKeyDbReopensAfterRestart(t *testing.T) {
+	defer setup()()
+
+	// Key derived by initKeyDb during the first Startup.
+	initKey := make([]byte, len(keyStorage.key))
+	copy(initKey, keyStorage.key)
+
+	// Write a secure value through the public API.
+	testDb := "reopen-secure-db"
+	dataKey := "dataKey"
+	dataValue, err := randomValues(256)
+	assert.Nil(t, err)
+	assert.Nil(t, CreateDatabase(testDb, true))
+	assert.Nil(t, InsertEntry(testDb, dataKey, dataValue))
+
+	// Simulate a full process restart: close and drop the pool singleton and the
+	// in-memory keyring handle, but leave all files on disk as a real restart would.
+	GetConnectionPool().CloseAll()
+	connectionPool = nil
+	connectionPoolOnce = sync.Once{}
+	keyStorage.key = nil
+	keyStorage.db = nil
+
+	// Reopen the key DB against the existing lock.db on a fresh pool.
+	err = openKeyDb()
+	assert.Nil(t, err)
+	// The re-derived key must be byte-identical to the init-time key.
+	assert.Equal(t, initKey, keyStorage.key)
+
+	// The secure value written before the restart must still be readable, which
+	// requires the reopened keyring to decrypt correctly.
+	getValue, err := GetEntry(testDb, dataKey)
+	assert.Nil(t, err)
+	assert.Equal(t, string(dataValue), string(getValue))
+}
+
 func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
 	defer setup()()
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
