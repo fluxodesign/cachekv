@@ -77,7 +77,7 @@ func ValidateConfiguration(ctx context.Context, config *Config, strict bool) err
 		errors = append(errors, &ValidationError{Field: "StorePath", Code: 5010, Message: "store path is empty"})
 	}
 
-	if len(config.MetaFile) == 0 && metaStorage.file != "" {
+	if len(config.MetaFile) == 0 && loadMetaIdent().file != "" {
 		log.Printf("Warning: MetaFile in config differs from runtime value\n")
 	}
 
@@ -93,7 +93,7 @@ func ValidateConfiguration(ctx context.Context, config *Config, strict bool) err
 	}
 
 	// Verify metaStorage and keyStorage are properly initialized
-	if metaStorage.path == "" || metaStorage.file == "" {
+	if metaID := loadMetaIdent(); metaID.path == "" || metaID.file == "" {
 		errors = append(errors, &ValidationError{Field: "MetaStorage", Code: 5030, Message: "meta storage not initialized"})
 	}
 

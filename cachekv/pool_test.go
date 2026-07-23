@@ -42,7 +42,7 @@ func poolSetup() func() {
 
 		time.Sleep(200 * time.Millisecond) // Allow background tasks to finish
 
-		metaPath := path.Join(metaStorage.path, metaStorage.file)
+		metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 		if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
 			if err := os.RemoveAll(metaPath); err != nil {
 				log.Println("error removing test db file: ", err)

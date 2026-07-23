@@ -30,7 +30,7 @@ func setup() func() {
 		GetConnectionPool().CloseAll()
 		connectionPool = nil
 		connectionPoolOnce = sync.Once{}
-		metaPath := path.Join(metaStorage.path, metaStorage.file)
+		metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 		_, err = os.Stat(metaPath)
 		if err == nil {
 			err = os.RemoveAll(metaPath)
@@ -64,7 +64,7 @@ func TestInit(t *testing.T) {
 	defer setup()()
 	assert.True(t, checkMetaFile())
 	assert.NotNil(t, metaStorage.db)
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	_, err := os.Stat(metaPath)
 	assert.Nil(t, err)
 }
@@ -79,7 +79,7 @@ func TestSetGetMetaEntry(t *testing.T) {
 
 func TestDifferentEncryptionKeys(t *testing.T) {
 	defer setup()()
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	assert.Nil(t, writeMetaEntry("testkey", []byte("testvalue")))
 	time.Sleep(2 * time.Second)
 	value, err := getMetaEntry("testkey")
@@ -95,9 +95,9 @@ func TestDifferentEncryptionKeys(t *testing.T) {
 
 func TestCopyMetasTwoRecords(t *testing.T) {
 	defer setup()()
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	pool := GetConnectionPool()
-	oldDb, err := pool.Get(metaPath, metaStorage.key)
+	oldDb, err := pool.Get(metaPath, loadMetaIdent().key)
 	assert.Nil(t, err)
 	assert.Nil(t, setDbEntry([]byte("prefix:testkey"), []byte("testvalue"), oldDb))
 	assert.Nil(t, setDbEntry([]byte("prefix:testkey2"), []byte("testvalue2"), oldDb))
@@ -106,7 +106,7 @@ func TestCopyMetasTwoRecords(t *testing.T) {
 	assert.Equal(t, 2, keys)
 	pool.Release(metaPath)
 	newPath, newKey, err := copyMetas()
-	newMetaPath := path.Join(metaStorage.path, newPath)
+	newMetaPath := path.Join(loadMetaIdent().path, newPath)
 	// We need to wait for the pool's cleanup or ensure the pool closes it if we want to re-open it.
 	// But actually, we SHOULD use the pool here too.
 	newDb, err := pool.Get(newMetaPath, newKey)
@@ -142,9 +142,9 @@ func TestCopyMetas(t *testing.T) {
 	assert.Nil(t, initMetaDb())
 	err := metaBatchInsert(&values)
 	assert.Nil(t, err)
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	pool := GetConnectionPool()
-	oldDb, err := pool.Get(metaPath, metaStorage.key)
+	oldDb, err := pool.Get(metaPath, loadMetaIdent().key)
 	assert.Nil(t, err)
 	records, err := countRecords("prefix:", oldDb, false)
 	assert.Nil(t, err)
@@ -187,23 +187,23 @@ func TestCopyMetasCommitsRotation(t *testing.T) {
 	defer setup()()
 
 	// Seed the current meta DB with a record.
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	pool := GetConnectionPool()
-	db, err := pool.Get(metaPath, metaStorage.key)
+	db, err := pool.Get(metaPath, loadMetaIdent().key)
 	assert.Nil(t, err)
 	assert.Nil(t, setDbEntry([]byte("prefix:k1"), []byte("v1"), db))
 	pool.Release(metaPath)
 
-	oldFile := metaStorage.file
+	oldFile := loadMetaIdent().file
 
 	newFile, newKey, err := copyMetas()
 	assert.Nil(t, err)
 	assert.NotEqual(t, "", newFile)
 
 	// The in-memory metaStorage must now point at the rotated DB.
-	assert.Equal(t, newFile, metaStorage.file)
-	assert.Equal(t, newKey, metaStorage.key)
-	assert.NotEqual(t, oldFile, metaStorage.file)
+	assert.Equal(t, newFile, loadMetaIdent().file)
+	assert.Equal(t, newKey, loadMetaIdent().key)
+	assert.NotEqual(t, oldFile, loadMetaIdent().file)
 
 	// The new meta key must be persisted to the keyring so a restart can open it.
 	persisted, err := getFromKeyring(prefixMetaKey)
@@ -214,8 +214,8 @@ func TestCopyMetasCommitsRotation(t *testing.T) {
 	assert.False(t, metaStorage.rotatingKey.Load())
 
 	// The rotated data must be readable through the committed metaStorage.
-	newMetaPath := path.Join(metaStorage.path, metaStorage.file)
-	rdb, err := pool.Get(newMetaPath, metaStorage.key)
+	newMetaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
+	rdb, err := pool.Get(newMetaPath, loadMetaIdent().key)
 	assert.Nil(t, err)
 	val, err := getDbEntry([]byte("prefix:k1"), rdb)
 	assert.Nil(t, err)
@@ -228,8 +228,8 @@ func TestCopyMetasCommitsRotation(t *testing.T) {
 // leaves metaStorage.{file,key} untouched (the no-partial-commit invariant from H3).
 func TestCopyMetasRefusesWhenAlreadyRotating(t *testing.T) {
 	defer setup()()
-	oldFile := metaStorage.file
-	oldKey := metaStorage.key
+	oldFile := loadMetaIdent().file
+	oldKey := loadMetaIdent().key
 
 	metaStorage.rotatingKey.Store(true)
 	defer metaStorage.rotatingKey.Store(false)
@@ -240,8 +240,8 @@ func TestCopyMetasRefusesWhenAlreadyRotating(t *testing.T) {
 	assert.Nil(t, newKey)
 
 	// No commit must have happened.
-	assert.Equal(t, oldFile, metaStorage.file)
-	assert.Equal(t, oldKey, metaStorage.key)
+	assert.Equal(t, oldFile, loadMetaIdent().file)
+	assert.Equal(t, oldKey, loadMetaIdent().key)
 }
 
 // TestConcurrentRotatingKeyAccess exercises the H2 fix under -race: the rotation
@@ -287,6 +287,51 @@ func TestConcurrentRotatingKeyAccess(t *testing.T) {
 	wg.Wait()
 }
 
+// TestConcurrentMetaIdentityAccess exercises the H2 reader-lock fix under -race: the
+// meta identity (path/file/key) is swapped atomically on rotation, so readers loading
+// it via metaPathAndKey must never race with a concurrent storeMetaIdent swap.
+func TestConcurrentMetaIdentityAccess(t *testing.T) {
+	defer setup()()
+	orig := loadMetaIdent()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Writer: publish new meta identities continuously, as rotation commit does.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				storeMetaIdent(orig.path, orig.file, orig.key) // restore for teardown
+				return
+			default:
+				storeMetaIdent(orig.path, "meta-swap", orig.key)
+				storeMetaIdent(orig.path, orig.file, orig.key)
+			}
+		}
+	}()
+
+	// Readers: load the identity lock-free.
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 500 {
+				p, key := metaPathAndKey()
+				_, _ = p, key
+			}
+		}()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	assert.Equal(t, orig.file, loadMetaIdent().file)
+}
+
 func TestDefaultConfig(t *testing.T) {
 	defer setup()()
 	cfg, err := ListConfigurations()
@@ -294,7 +339,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, cfg.SecureNewDb)
 	assert.Equal(t, StorePath, cfg.StorePath)
 	assert.Equal(t, StorePath, cfg.MetaStore)
-	assert.Equal(t, metaStorage.file, cfg.MetaFile)
+	assert.Equal(t, loadMetaIdent().file, cfg.MetaFile)
 }
 
 func TestUpdateConfigurations(t *testing.T) {
@@ -304,7 +349,7 @@ func TestUpdateConfigurations(t *testing.T) {
 	assert.True(t, cfg.SecureNewDb)
 	assert.Equal(t, StorePath, cfg.StorePath)
 	assert.Equal(t, StorePath, cfg.MetaStore)
-	assert.Equal(t, metaStorage.file, cfg.MetaFile)
+	assert.Equal(t, loadMetaIdent().file, cfg.MetaFile)
 	// change the config
 	newStorePath := "/var/tmp/blah"
 	newMetaFile := "blah-blah.meta"
@@ -625,9 +670,9 @@ func TestGetEntryWithinALotOfEntries(t *testing.T) {
 func TestInitReloadingExistingMetafile(t *testing.T) {
 	defer setup()()
 	// Meta and Key DBs are already opened by Startup() in setup()
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	pool := GetConnectionPool()
-	metaDb, err := pool.Get(metaPath, metaStorage.key)
+	metaDb, err := pool.Get(metaPath, loadMetaIdent().key)
 	assert.Nil(t, err)
 	assert.NotNil(t, metaDb)
 	pool.Release(metaPath)
@@ -822,7 +867,7 @@ func TestPoolJanitorSweepsIdleConnections(t *testing.T) {
 
 func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
 	defer setup()()
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	_, err := os.Stat(metaPath)
 	assert.Nil(t, err)
 
@@ -832,7 +877,7 @@ func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
 	err = os.RemoveAll(metaPath)
 	assert.Nil(t, err)
 	assert.Nil(t, openMetaDb())
-	metaPath = path.Join(metaStorage.path, metaStorage.file)
+	metaPath = path.Join(loadMetaIdent().path, loadMetaIdent().file)
 	_, err = os.Stat(metaPath)
 	assert.Nil(t, err)
 }

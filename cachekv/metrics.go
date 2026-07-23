@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"log"
-	"path"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -193,19 +192,22 @@ func Shutdown(ctx context.Context, timeout time.Duration) error {
 		}
 		log.Println("[2/4] Metrics flushed")
 
-		// Step 3: Close connection pool (waits for active connections to finish)
+		// Step 3: Write final state while the pool is still open. This must happen
+		// BEFORE CloseAll — otherwise writeShutdownEvent reopens the meta DB on a
+		// pool whose context is already cancelled, leaking a connection that never
+		// gets closed before exit (M2).
+		writeShutdownEvent(ctx)
+		log.Println("[3/4] Final state written")
+
+		// Step 4: Close connection pool last (waits for active connections to finish).
 		globalStateMu.RLock()
 		pool := connectionPool
 		globalStateMu.RUnlock()
 
 		if pool != nil {
 			pool.CloseAll()
-			log.Println("[3/4] Connection pool closed")
+			log.Println("[4/4] Connection pool closed - all resources released")
 		}
-
-		// Step 4: Write final state and exit gracefully
-		writeShutdownEvent(ctx)
-		log.Println("[4/4] Shutdown complete - all resources released")
 	}()
 
 	// Wait for shutdown to complete or timeout
@@ -242,9 +244,9 @@ func writeShutdownEvent(ctx context.Context) {
 		TStamp:  now,
 	}
 
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath, metaKey := metaPathAndKey()
 	pool := GetConnectionPool()
-	db, err := pool.Get(metaPath, metaStorage.key)
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		log.Printf("Warning: could not open meta database for shutdown event: %v\n", err)
 		return

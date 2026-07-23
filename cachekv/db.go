@@ -107,12 +107,33 @@ func Startup() {
 	}
 }
 
+// loadMetaIdent returns the current meta identity snapshot, or a zero value if the
+// meta DB has not been initialised yet. Lock-free (see H2).
+func loadMetaIdent() metaIdent {
+	if p := metaIdentPtr.Load(); p != nil {
+		return *p
+	}
+	return metaIdent{}
+}
+
+// storeMetaIdent atomically publishes a new meta identity. Callers set the whole
+// identity at once so readers never observe a mismatched path/key.
+func storeMetaIdent(dir, file string, key []byte) {
+	metaIdentPtr.Store(&metaIdent{path: dir, file: file, key: key})
+}
+
+// metaPathAndKey returns the full path and encryption key of the active meta DB.
+func metaPathAndKey() (string, []byte) {
+	id := loadMetaIdent()
+	return path.Join(id.path, id.file), id.key
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		StorePath:   StorePath,
 		SecureNewDb: true,
 		MetaStore:   StorePath,
-		MetaFile:    metaStorage.file,
+		MetaFile:    loadMetaIdent().file,
 	}
 }
 
@@ -120,9 +141,9 @@ func writeMetaEntry(key string, value []byte) error {
 	if metaStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath, metaKey := metaPathAndKey()
 	pool := GetConnectionPool()
-	db, err := pool.Get(metaPath, metaStorage.key)
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return err
 	}
@@ -135,9 +156,9 @@ func getMetaEntry(key string) ([]byte, error) {
 	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath, metaKey := metaPathAndKey()
 	pool := GetConnectionPool()
-	db, err := pool.Get(metaPath, metaStorage.key)
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return nil, err
 	}
@@ -294,10 +315,11 @@ func randomValues(length int) ([]byte, error) {
 }
 
 func checkMetaFile() bool {
-	if metaStorage.path == "" || metaStorage.file == "" {
+	id := loadMetaIdent()
+	if id.path == "" || id.file == "" {
 		return false
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(id.path, id.file)
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
 		return false
 	}
@@ -346,21 +368,21 @@ func initMetaDb() error {
 		log.Println("Error generating random values:", fErr)
 		return fErr
 	}
-	metaStorage.path = StorePath
-	metaStorage.file = "meta-" + string(fileKey)
-	metaStorage.key, fErr = randomValues(keyLength)
+	metaFile := "meta-" + string(fileKey)
+	metaKey, fErr := randomValues(keyLength)
 	if fErr != nil {
 		log.Println("Error generating random values:", fErr)
 		return fErr
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	storeMetaIdent(StorePath, metaFile, metaKey)
+	metaPath := path.Join(StorePath, metaFile)
 	pool := GetConnectionPool()
 	var err error
-	metaStorage.db, err = pool.Get(metaPath, metaStorage.key)
+	metaStorage.db, err = pool.Get(metaPath, metaKey)
 	if err != nil {
 		return err
 	}
-	fErr = WriteToKeyring(prefixMetaKey, metaStorage.key)
+	fErr = WriteToKeyring(prefixMetaKey, metaKey)
 	if fErr != nil {
 		log.Println("Error saving key file to keyring:", fErr)
 	}
@@ -435,17 +457,15 @@ func openMetaDb() error {
 		}
 	}
 	if latestMetaTimestamp > 0 {
-		metaStorage.path = StorePath
-		metaStorage.file = latestMetaName
 		key, e := getFromKeyring(prefixMetaKey)
 		if e != nil {
 			log.Println("error reading keyring for meta key: ", e)
 			return e
 		}
-		metaStorage.key = key
-		metaPath := path.Join(metaStorage.path, metaStorage.file)
+		storeMetaIdent(StorePath, latestMetaName, key)
+		metaPath := path.Join(StorePath, latestMetaName)
 		pool := GetConnectionPool()
-		metaStorage.db, err = pool.Get(metaPath, metaStorage.key)
+		metaStorage.db, err = pool.Get(metaPath, key)
 		if err != nil {
 			return err
 		}
@@ -577,9 +597,9 @@ func listDatabases() (map[string]DbObject, error) {
 	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath, metaKey := metaPathAndKey()
 	pool := GetConnectionPool()
-	db, err := pool.Get(metaPath, metaStorage.key)
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return nil, err
 	}
@@ -612,11 +632,11 @@ func metaBatchInsert(values *map[string][]byte) error {
 		return errors.New(errDbRotating)
 	}
 	var err error
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath, metaKey := metaPathAndKey()
 	pool := GetConnectionPool()
 	// Use a local handle rather than mutating the shared metaStorage.db, which was
 	// written here without holding globalStateMu (H2).
-	db, err := pool.Get(metaPath, metaStorage.key)
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return err
 	}
@@ -684,11 +704,12 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	if metaStorage.rotatingKey.Load() {
 		return "", nil, errors.New("rotate flag already raised")
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	oldFile := metaStorage.file
+	srcIdent := loadMetaIdent()
+	metaPath := path.Join(srcIdent.path, srcIdent.file)
+	oldFile := srcIdent.file
 	pool := GetConnectionPool()
 	// Use a local handle rather than mutating the shared metaStorage.db (H2).
-	srcDb, err := pool.Get(metaPath, metaStorage.key)
+	srcDb, err := pool.Get(metaPath, srcIdent.key)
 	if err != nil {
 		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
 		return "", nil, err
@@ -762,16 +783,13 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 
 	// H3: commit the rotation. Persist the new meta key to the keyring first so a
 	// restart's openMetaDb (which reads prefixMetaKey) can open the newest meta dir,
-	// then atomically swap the in-memory metaStorage.{file,key} under the write lock.
+	// then atomically publish the new meta identity so readers pick it up lock-free.
 	if err = WriteToKeyring(prefixMetaKey, newMetaKey); err != nil {
 		log.Println("Error persisting rotated meta key to keyring: ", err)
 		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
 		return "", nil, err
 	}
-	globalStateMu.Lock()
-	metaStorage.file = newMetaFile
-	metaStorage.key = newMetaKey
-	globalStateMu.Unlock()
+	storeMetaIdent(srcIdent.path, newMetaFile, newMetaKey)
 
 	duration := time.Since(startTime)
 	metricsCollector.RecordOperation(ctx, "rotation", newMetaFile, duration, true)
@@ -1124,9 +1142,9 @@ func ListDatabases() ([]string, error) {
 	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath, metaKey := metaPathAndKey()
 	pool := GetConnectionPool()
-	db, err := pool.Get(metaPath, metaStorage.key)
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return nil, err
 	}

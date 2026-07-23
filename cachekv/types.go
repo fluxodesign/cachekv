@@ -75,11 +75,23 @@ const (
 	shutdownFlagDefault int32 = 0
 )
 
+// metaIdent is the identity of the active meta database: where it lives and the
+// key to open it. It is swapped atomically on key rotation so hot-path readers
+// never take a lock (and can never observe a torn path/key pair). See H2.
+type metaIdent struct {
+	path string
+	file string
+	key  []byte
+}
+
 // Global state with mutex protection for thread safety
 var (
-	globalStateMu      sync.RWMutex
+	globalStateMu sync.RWMutex
+	// metaStorage's identity (path/file/key) lives in metaIdentPtr, not in the
+	// struct fields — only its .db and .rotatingKey are used for the meta DB.
 	metaStorage        Storage
 	keyStorage         Storage
+	metaIdentPtr       atomic.Pointer[metaIdent]
 	fxConfig           *Config
 	connectionPool     *ConnectionPool
 	connectionPoolOnce sync.Once
