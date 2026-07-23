@@ -167,9 +167,8 @@ func TestPoolConcurrentGetRelease(t *testing.T) {
 
 				// Perform a simple operation to ensure connection is valid
 				testKey := "test-key-" + string(rune(id)) + "-" + string(rune(j))
-				err = setDbEntry([]byte(testKey), []byte("value"), db)
-				if err != nil {
-					errors <- err
+				if werr := setDbEntry([]byte(testKey), []byte("value"), db); werr != nil {
+					errors <- werr
 				}
 
 				pool.Release(dbPath)

@@ -117,7 +117,7 @@ func DefaultConfig() *Config {
 }
 
 func writeMetaEntry(key string, value []byte) error {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
@@ -132,7 +132,7 @@ func writeMetaEntry(key string, value []byte) error {
 }
 
 func getMetaEntry(key string) ([]byte, error) {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
@@ -230,16 +230,17 @@ func getMetaDbObject(dbName string) (*DbObject, error) {
 		return nil, err
 	}
 	dbo := &DbObject{}
-	err = json.Unmarshal(entry, dbo)
-	if err != nil {
+	if err = json.Unmarshal(entry, dbo); err != nil {
 		return nil, err
 	}
-	err = writeMetaEvent(EventTypeRead, "Read meta db object: "+prefixMetaDb+dbName)
-	return dbo, err
+	// Reads must not mutate state: emitting a meta event here caused an encrypted
+	// write on every data operation (GetEntry/InsertEntry/…) and made reads fail
+	// outright during key rotation (writeMetaEntry returns errDbRotating). See H1.
+	return dbo, nil
 }
 
 func WriteToKeyring(key string, value []byte) error {
-	if keyStorage.rotatingKey {
+	if keyStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
 	}
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
@@ -254,7 +255,7 @@ func WriteToKeyring(key string, value []byte) error {
 }
 
 func getFromKeyring(key string) ([]byte, error) {
-	if keyStorage.rotatingKey {
+	if keyStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
@@ -496,16 +497,13 @@ func GetStorageObject(dbName string) (*Storage, error) {
 	db, err := GetConnectionPool().Get(dbPath, b64Decoded)
 	if err != nil {
 		log.Println("error opening database: ", err)
-		if db == nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	storageObject := &Storage{
-		db:          db,
-		path:        dbObject.DbPath,
-		file:        dbObject.DbFile,
-		key:         dbKey,
-		rotatingKey: false,
+		db:   db,
+		path: dbObject.DbPath,
+		file: dbObject.DbFile,
+		key:  dbKey,
 		// dbPath is exactly the key used for pool.Get above; Close releases it.
 		poolKey: dbPath,
 	}
@@ -576,7 +574,7 @@ func listDatabases() (map[string]DbObject, error) {
 	globalStateMu.RLock()
 	defer globalStateMu.RUnlock()
 
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
@@ -610,18 +608,20 @@ func listDatabases() (map[string]DbObject, error) {
 }
 
 func metaBatchInsert(values *map[string][]byte) error {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
 	}
 	var err error
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
 	pool := GetConnectionPool()
-	metaStorage.db, err = pool.Get(metaPath, metaStorage.key)
+	// Use a local handle rather than mutating the shared metaStorage.db, which was
+	// written here without holding globalStateMu (H2).
+	db, err := pool.Get(metaPath, metaStorage.key)
 	if err != nil {
 		return err
 	}
 	defer pool.Release(metaPath)
-	wb := metaStorage.db.NewWriteBatch()
+	wb := db.NewWriteBatch()
 	defer wb.Cancel()
 
 	for key, val := range *values {
@@ -681,23 +681,26 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	ctx := context.Background()
 	startTime := time.Now()
 
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return "", nil, errors.New("rotate flag already raised")
 	}
-	var e error
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	oldFile := metaStorage.file
 	pool := GetConnectionPool()
-	metaStorage.db, e = pool.Get(metaPath, metaStorage.key)
-	if e != nil {
-		metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, time.Since(startTime), false)
-		return "", nil, e
+	// Use a local handle rather than mutating the shared metaStorage.db (H2).
+	srcDb, err := pool.Get(metaPath, metaStorage.key)
+	if err != nil {
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
 	}
 	defer pool.Release(metaPath)
 
-	metaStorage.rotatingKey = true
+	metaStorage.rotatingKey.Store(true)
+	// Always clear the flag on the way out, including the early error returns below.
+	defer metaStorage.rotatingKey.Store(false)
 
 	itemCount := 0
-	err = metaStorage.db.View(func(txn *badger.Txn) error {
+	err = srcDb.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
@@ -716,52 +719,67 @@ func copyMetas() (newPath string, newKey []byte, err error) {
 	newDb, err := pool.Get(newMetaPath, newMetaKey)
 	if err != nil {
 		log.Println("Error opening new meta database: ", err)
-		metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, time.Since(startTime), false)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
 		return "", nil, err
 	}
 	defer pool.Release(newMetaPath)
 
 	values := make(map[string][]byte)
-	stream := metaStorage.db.NewStream()
+	stream := srcDb.NewStream()
 	stream.NumGo = 20
 	stream.ChooseKey = func(item *badger.Item) bool {
 		return bytes.HasPrefix(item.Key(), stream.Prefix)
 	}
 	stream.Send = func(buffer *z.Buffer) error {
 		var list pb.KVList
-		err = buffer.SliceIterate(func(slice []byte) error {
+		if serr := buffer.SliceIterate(func(slice []byte) error {
 			kv := new(pb.KV)
-			if err = proto.Unmarshal(slice, kv); err != nil {
-				return err
+			if uerr := proto.Unmarshal(slice, kv); uerr != nil {
+				return uerr
 			}
 			list.Kv = append(list.Kv, kv)
 			return nil
-		})
-		if err != nil {
-			return err
+		}); serr != nil {
+			return serr
 		}
 		for _, element := range list.Kv {
-			key := element.Key
-			value := element.Value
-			values[string(key)] = value
+			values[string(element.Key)] = element.Value
 		}
-		return err
+		return nil
 	}
-	err = stream.Orchestrate(context.Background())
-	err = batchInsertGeneric(ctx, &values, newDb)
-	metaStorage.rotatingKey = false
-	// We MUST close it to release the lock because rotation might be followed by other operations
-	// that expect the lock to be available, or tests that check the file.
-	// But since we are using the pool, we just release it.
-	pool.Release(newMetaPath)
+	// H3: check the stream error BEFORE writing. A failed read of the source data
+	// must not proceed to write a partial/empty new meta DB and report success.
+	if err = stream.Orchestrate(context.Background()); err != nil {
+		log.Println("Error streaming source meta database: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
+	}
+	if err = batchInsertGeneric(ctx, &values, newDb); err != nil {
+		log.Println("Error writing rotated meta database: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
+	}
+
+	// H3: commit the rotation. Persist the new meta key to the keyring first so a
+	// restart's openMetaDb (which reads prefixMetaKey) can open the newest meta dir,
+	// then atomically swap the in-memory metaStorage.{file,key} under the write lock.
+	if err = WriteToKeyring(prefixMetaKey, newMetaKey); err != nil {
+		log.Println("Error persisting rotated meta key to keyring: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
+	}
+	globalStateMu.Lock()
+	metaStorage.file = newMetaFile
+	metaStorage.key = newMetaKey
+	globalStateMu.Unlock()
 
 	duration := time.Since(startTime)
-	metricsCollector.RecordOperation(ctx, "rotation", metaStorage.file, duration, true)
-	metricsCollector.RecordKeyRotation(metaStorage.file, newMetaFile, itemCount)
+	metricsCollector.RecordOperation(ctx, "rotation", newMetaFile, duration, true)
+	metricsCollector.RecordKeyRotation(oldFile, newMetaFile, itemCount)
 
 	log.Printf("Key rotation complete: %s -> %s (%d items in %v)\n",
-		metaStorage.file, newMetaFile, itemCount, duration)
-	return newMetaFile, newMetaKey, err
+		oldFile, newMetaFile, itemCount, duration)
+	return newMetaFile, newMetaKey, nil
 }
 
 func b64Encode(input []byte) string {
@@ -1103,7 +1121,7 @@ func (t *Storage) All() (map[string][]byte, error) {
 }
 
 func ListDatabases() ([]string, error) {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
 	metaPath := path.Join(metaStorage.path, metaStorage.file)
@@ -1135,20 +1153,21 @@ func ListDatabases() ([]string, error) {
 }
 
 func NewStorage(db *badger.DB, path string, file string, key []byte, rotating bool) *Storage {
-	return &Storage{
-		db:          db,
-		path:        path,
-		file:        file,
-		key:         key,
-		rotatingKey: rotating,
+	s := &Storage{
+		db:   db,
+		path: path,
+		file: file,
+		key:  key,
 	}
+	s.rotatingKey.Store(rotating)
+	return s
 }
 
 func ListConfigurations() (*Config, error) {
 	globalStateMu.RLock()
 	defer globalStateMu.RUnlock()
 
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
 

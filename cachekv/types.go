@@ -3,16 +3,20 @@ package cachekv
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dgraph-io/badger/v4"
 )
 
 type Storage struct {
-	db          *badger.DB
-	path        string
-	file        string
-	key         []byte
-	rotatingKey bool
+	db   *badger.DB
+	path string
+	file string
+	key  []byte
+	// rotatingKey is read and written from multiple goroutines (readers gate on it
+	// to bail out during a key rotation), so it must be accessed atomically. Storage
+	// must therefore only be used via pointer / the package globals, never copied.
+	rotatingKey atomic.Bool
 	// poolKey is the exact key this handle acquired from the connection pool
 	// (the dbPath passed to pool.Get). Close releases that reference. It is
 	// empty when the handle is not pool-managed (e.g. built via NewStorage),

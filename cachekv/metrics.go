@@ -230,7 +230,7 @@ func writeShutdownEvent(ctx context.Context) {
 	globalStateMu.RLock()
 	defer globalStateMu.RUnlock()
 
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		log.Println("Cannot write shutdown event during key rotation")
 		return
 	}

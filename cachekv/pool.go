@@ -33,12 +33,16 @@ type poolEntry struct {
 // NewConnectionPool creates a new connection pool with configurable timeout
 func NewConnectionPool(timeout time.Duration) *ConnectionPool {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ConnectionPool{
+	p := &ConnectionPool{
 		storages: make(map[string]*poolEntry),
 		timeout:  timeout,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
+	// A single background janitor sweeps idle connections, rather than spawning a
+	// goroutine per zero-crossing in Release. It stops when the pool is closed.
+	go p.janitor()
+	return p
 }
 
 // GetDefaultTimeout returns the configured timeout based on environment
@@ -99,7 +103,9 @@ func (p *ConnectionPool) Get(dbPath string, key []byte) (*badger.DB, error) {
 	return db, nil
 }
 
-// Release decreases the reference count for a connection
+// Release decreases the reference count for a connection. Connections that reach
+// zero references are not closed here; the background janitor reclaims them once
+// they have been idle for at least the pool timeout.
 func (p *ConnectionPool) Release(dbPath string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -110,30 +116,39 @@ func (p *ConnectionPool) Release(dbPath string) {
 	}
 
 	entry.refCount--
-	if entry.refCount <= 0 {
-		// Mark for cleanup but don't close immediately
+	if entry.refCount < 0 {
 		entry.refCount = 0
-		go p.scheduleCleanup(dbPath)
 	}
 }
 
-// scheduleCleanup delays closing idle connections to allow concurrent access
-func (p *ConnectionPool) scheduleCleanup(dbPath string) {
-	select {
-	case <-time.After(p.timeout):
-		p.mu.Lock()
-		defer p.mu.Unlock()
+// janitor periodically sweeps idle connections until the pool is closed. Using one
+// long-lived goroutine avoids spawning (and leaking) a timer goroutine per Release.
+func (p *ConnectionPool) janitor() {
+	ticker := time.NewTicker(p.timeout)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.sweepIdle()
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
 
-		entry := p.storages[dbPath]
-		if entry != nil && !entry.db.IsClosed() && entry.refCount == 0 && time.Since(entry.lastAccess) >= p.timeout {
-			err := entry.db.Close()
-			if err != nil {
+// sweepIdle closes and removes every connection that currently has no references
+// and has been idle for at least the pool timeout.
+func (p *ConnectionPool) sweepIdle() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for dbPath, entry := range p.storages {
+		if entry.refCount == 0 && !entry.db.IsClosed() && time.Since(entry.lastAccess) >= p.timeout {
+			if err := entry.db.Close(); err != nil {
 				log.Printf("Error closing database %s: %v", dbPath, err)
 			}
 			delete(p.storages, dbPath)
 		}
-	case <-p.ctx.Done():
-		return
 	}
 }
 

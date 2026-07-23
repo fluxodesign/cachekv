@@ -180,6 +180,113 @@ func TestCopyMetas(t *testing.T) {
 	pool.Release(newMetaPath)
 }
 
+// TestCopyMetasCommitsRotation verifies the H3 fix: on success copyMetas commits the
+// rotation by swapping the in-memory metaStorage.{file,key} and persisting the new
+// meta key to the keyring, and clears the rotation flag.
+func TestCopyMetasCommitsRotation(t *testing.T) {
+	defer setup()()
+
+	// Seed the current meta DB with a record.
+	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaStorage.key)
+	assert.Nil(t, err)
+	assert.Nil(t, setDbEntry([]byte("prefix:k1"), []byte("v1"), db))
+	pool.Release(metaPath)
+
+	oldFile := metaStorage.file
+
+	newFile, newKey, err := copyMetas()
+	assert.Nil(t, err)
+	assert.NotEqual(t, "", newFile)
+
+	// The in-memory metaStorage must now point at the rotated DB.
+	assert.Equal(t, newFile, metaStorage.file)
+	assert.Equal(t, newKey, metaStorage.key)
+	assert.NotEqual(t, oldFile, metaStorage.file)
+
+	// The new meta key must be persisted to the keyring so a restart can open it.
+	persisted, err := getFromKeyring(prefixMetaKey)
+	assert.Nil(t, err)
+	assert.Equal(t, newKey, persisted)
+
+	// The rotation flag must be cleared after a successful rotation.
+	assert.False(t, metaStorage.rotatingKey.Load())
+
+	// The rotated data must be readable through the committed metaStorage.
+	newMetaPath := path.Join(metaStorage.path, metaStorage.file)
+	rdb, err := pool.Get(newMetaPath, metaStorage.key)
+	assert.Nil(t, err)
+	val, err := getDbEntry([]byte("prefix:k1"), rdb)
+	assert.Nil(t, err)
+	assert.Equal(t, []byte("v1"), val)
+	pool.Release(newMetaPath)
+}
+
+// TestCopyMetasRefusesWhenAlreadyRotating verifies that a failed rotation does not
+// commit: when the rotation flag is already raised, copyMetas returns an error and
+// leaves metaStorage.{file,key} untouched (the no-partial-commit invariant from H3).
+func TestCopyMetasRefusesWhenAlreadyRotating(t *testing.T) {
+	defer setup()()
+	oldFile := metaStorage.file
+	oldKey := metaStorage.key
+
+	metaStorage.rotatingKey.Store(true)
+	defer metaStorage.rotatingKey.Store(false)
+
+	newFile, newKey, err := copyMetas()
+	assert.NotNil(t, err)
+	assert.Equal(t, "", newFile)
+	assert.Nil(t, newKey)
+
+	// No commit must have happened.
+	assert.Equal(t, oldFile, metaStorage.file)
+	assert.Equal(t, oldKey, metaStorage.key)
+}
+
+// TestConcurrentRotatingKeyAccess exercises the H2 fix under -race: the rotation
+// flag is read by every meta operation and written during rotation, so it must be
+// safe to touch from multiple goroutines. Toggling it while readers gate on it must
+// not trip the race detector.
+func TestConcurrentRotatingKeyAccess(t *testing.T) {
+	defer setup()()
+	assert.Nil(t, writeMetaEntry("k", []byte("v")))
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Writer: toggle the rotation flag continuously.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				metaStorage.rotatingKey.Store(true)
+				metaStorage.rotatingKey.Store(false)
+			}
+		}
+	}()
+
+	// Readers: meta reads that gate on the flag (may intermittently see
+	// errDbRotating, which is expected and fine).
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				_, _ = getMetaEntry("k")
+			}
+		}()
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
 func TestDefaultConfig(t *testing.T) {
 	defer setup()()
 	cfg, err := ListConfigurations()
@@ -635,7 +742,7 @@ func TestKeyDbReopensAfterRestart(t *testing.T) {
 // TestGetStorageObjectDoesNotLeakPoolRef is a regression test for the C2 bug:
 // GetStorageObject increments the pool's refCount, so every caller that discards
 // the handle (e.g. databaseExist) must release it. Otherwise refCount grows without
-// bound and scheduleCleanup can never reclaim the connection. Here we run several
+// bound and the janitor can never reclaim the connection. Here we run several
 // existence checks, then acquire a single handle and assert the pool holds exactly
 // one reference — proving all earlier checks released theirs.
 func TestGetStorageObjectDoesNotLeakPoolRef(t *testing.T) {
@@ -677,6 +784,40 @@ func TestGetStorageObjectDoesNotLeakPoolRef(t *testing.T) {
 	}
 	pool.mu.RUnlock()
 	assert.Equal(t, 0, rc)
+}
+
+// TestPoolJanitorSweepsIdleConnections verifies the M1 fix: the single background
+// janitor reclaims connections that have gone idle (refCount 0 for at least the
+// pool timeout), instead of relying on a per-Release cleanup goroutine.
+func TestPoolJanitorSweepsIdleConnections(t *testing.T) {
+	defer setup()()
+
+	assert.Nil(t, CreateDatabase("janitortest", true))
+	dbObject, err := getMetaDbObject("janitortest")
+	assert.Nil(t, err)
+	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+
+	// Acquire and release, leaving the connection pooled with refCount 0.
+	so, err := GetStorageObject("janitortest")
+	assert.Nil(t, err)
+	so.Close()
+
+	pool := GetConnectionPool()
+	// The janitor ticks every pool timeout (100ms in tests); an idle entry can
+	// survive up to ~2 ticks, so poll generously for it to be reclaimed.
+	swept := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pool.mu.RLock()
+		_, present := pool.storages[dbPath]
+		pool.mu.RUnlock()
+		if !present {
+			swept = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	assert.True(t, swept, "janitor should reclaim the idle connection")
 }
 
 func TestOpenMetaDbWithDirAndNoFiles(t *testing.T) {
