@@ -1,3 +1,13 @@
+// Package cachekv is an encrypted key-value store built on top of BadgerDB.
+//
+// It manages a set of named databases (secure or plain), a keyring that holds
+// each secure database's encryption key, and a meta database that records the
+// catalogue of databases, configuration, and an audit event log. Connections
+// are shared through a reference-counted connection pool (see ConnectionPool).
+//
+// Call Startup once to initialize or open the store, then use CreateDatabase,
+// InsertEntry, GetEntry, and friends to work with individual databases. Call
+// Shutdown for a graceful teardown.
 package cachekv
 
 import (
@@ -24,7 +34,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// meta db stores the list of databases we have, etc.
+// StorePath is the directory under which all databases (including the meta DB)
+// are created, and KeyPath is the directory holding the keyring. Both may be
+// overridden before calling Startup.
 var (
 	StorePath = "./store/"
 	KeyPath   = "./.private"
@@ -37,6 +49,11 @@ const (
 	service      = "fxstorage"
 )
 
+// Startup initializes the storage system. On first run (StorePath does not yet
+// exist) it creates the store directory and initializes the keyring and meta
+// databases; otherwise it opens the existing ones. It then validates the
+// configuration and records a startup event. Startup must be called before any
+// other operation. Fatal errors during initialization terminate the process.
 func Startup() {
 	ctx := context.Background()
 	atomic.StoreInt32(&shutdownFlag, shutdownFlagDefault)
@@ -128,6 +145,9 @@ func metaPathAndKey() (string, []byte) {
 	return path.Join(id.path, id.file), id.key
 }
 
+// DefaultConfig returns a Config populated from the current store paths and the
+// active meta file. It is used for validation at startup and as a baseline for
+// callers that have not persisted their own configuration.
 func DefaultConfig() *Config {
 	return &Config{
 		StorePath:   StorePath,
@@ -168,8 +188,7 @@ func getMetaEntry(key string) ([]byte, error) {
 	err = db.View(func(txn *badger.Txn) error {
 		item, e := txn.Get([]byte(key))
 		if e != nil {
-			if errors.Is(e, badger.ErrKeyNotFound) ||
-				(e.Error() != "" && strings.Contains(e.Error(), "key not found")) {
+			if errors.Is(e, badger.ErrKeyNotFound) {
 				e = &EMetaKeyNotFound{
 					Code:    8404,
 					Message: "meta key not found",
@@ -202,6 +221,8 @@ func writeMetaEvent(eventType EventType, comment string) error {
 	return writeMetaEntry(key, value)
 }
 
+// WriteMetaConfig persists config to the meta database and records a
+// configuration-change event.
 func WriteMetaConfig(config *Config) error {
 	value, err := json.Marshal(config)
 	if err != nil {
@@ -260,6 +281,8 @@ func getMetaDbObject(dbName string) (*DbObject, error) {
 	return dbo, nil
 }
 
+// WriteToKeyring stores value under key in the keyring database. It returns an
+// error if a key rotation is currently in progress.
 func WriteToKeyring(key string, value []byte) error {
 	if keyStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
@@ -482,6 +505,10 @@ func openMetaDb() error {
 	return err
 }
 
+// GetStorageObject opens the named database and returns a *Storage handle for
+// it, loading the encryption key from the keyring for secure databases. The
+// returned handle holds a connection-pool reference; the caller must call
+// Close on it when finished to release that reference.
 func GetStorageObject(dbName string) (*Storage, error) {
 	globalStateMu.RLock()
 	defer globalStateMu.RUnlock()
@@ -534,6 +561,9 @@ func openUnsecuredDb(path string) (*badger.DB, error) {
 	return GetConnectionPool().Get(path, nil)
 }
 
+// OpenDatabase opens the BadgerDB at path with the given encryption key (pass
+// nil for an unencrypted database) and returns the underlying handle. Most
+// callers should go through the connection pool rather than opening directly.
 func OpenDatabase(path string, key []byte) (*badger.DB, error) {
 	opt := badger.DefaultOptions(path).WithEncryptionKey(key).WithEncryptionKeyRotationDuration(24 * time.Hour)
 	opt.IndexCacheSize = 100 << 20
@@ -545,6 +575,9 @@ func OpenDatabase(path string, key []byte) (*badger.DB, error) {
 	return db, nil
 }
 
+// CloseDatabase closes the underlying BadgerDB handle directly. Prefer
+// pool.Release(path) for pool-managed connections; this is retained for handles
+// whose path is not readily available and for tests.
 func CloseDatabase(db *badger.DB) error {
 	// If the database is managed by the pool, we should really be using pool.Release(path).
 	// However, CloseDatabase is used in some places where we have a *badger.DB but not its path easily available,
@@ -825,6 +858,9 @@ func getDbKey(dbName string, dbObject *DbObject) ([]byte, error) {
 	return nil, nil
 }
 
+// CreateDatabase creates a new database named dbName. When secure is true a
+// random encryption key is generated and stored in the keyring. It returns an
+// error if a database with the same name already exists.
 func CreateDatabase(dbName string, secure bool) error {
 	ctx := context.Background()
 	startTime := time.Now()
@@ -918,6 +954,9 @@ func databaseExist(dbName string) (bool, error) {
 	return true, nil
 }
 
+// InsertEntry writes value under key in the named database, opening it (and
+// loading its key, if secure) as needed. It returns an error if the system is
+// shutting down or the database is inactive.
 func InsertEntry(dbName string, key string, value []byte) error {
 	ctx := context.Background()
 	startTime := time.Now()
@@ -974,18 +1013,24 @@ func (t *Storage) Close() {
 	t.poolKey = ""
 }
 
+// InsertEntry writes value under key in this database.
 func (t *Storage) InsertEntry(key string, value []byte) error {
 	return setDbEntry([]byte(key), value, t.db)
 }
 
+// UpdateEntry writes value under key in the named database. It is an alias for
+// InsertEntry: writes are upserts.
 func UpdateEntry(dbName string, key string, value []byte) error {
 	return InsertEntry(dbName, key, value)
 }
 
+// UpdateEntry writes value under key in this database (an upsert).
 func (t *Storage) UpdateEntry(key string, value []byte) error {
 	return setDbEntry([]byte(key), value, t.db)
 }
 
+// RemoveEntry deletes key from the named database. It returns an error if the
+// database is inactive.
 func RemoveEntry(dbName string, key string) error {
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
@@ -1022,6 +1067,7 @@ func RemoveEntry(dbName string, key string) error {
 	return err
 }
 
+// RemoveEntry deletes key from this database and records a delete event.
 func (t *Storage) RemoveEntry(key string) error {
 	err := t.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete([]byte(key))
@@ -1031,6 +1077,8 @@ func (t *Storage) RemoveEntry(key string) error {
 
 }
 
+// BatchInsert writes all entries to the named database in a single batch. It
+// returns an error if the database is inactive.
 func BatchInsert(dbName string, entries map[string][]byte) error {
 	ctx := context.Background()
 	dbObject, err := getMetaDbObject(dbName)
@@ -1065,6 +1113,8 @@ func BatchInsert(dbName string, entries map[string][]byte) error {
 	return err
 }
 
+// BatchInsert writes all entries to this database in a single batch and records
+// a write event.
 func (t *Storage) BatchInsert(entries *map[string][]byte) error {
 	ctx := context.Background()
 	err := batchInsertGeneric(ctx, entries, t.db)
@@ -1072,6 +1122,8 @@ func (t *Storage) BatchInsert(entries *map[string][]byte) error {
 	return err
 }
 
+// GetEntry reads the value stored under key in the named database. It returns
+// an error if the system is shutting down or the database is inactive.
 func GetEntry(dbName string, key string) ([]byte, error) {
 	ctx := context.Background()
 	startTime := time.Now()
@@ -1113,10 +1165,13 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	return value, err
 }
 
+// GetEntry reads the value stored under key in this database.
 func (t *Storage) GetEntry(key string) ([]byte, error) {
 	return getDbEntry([]byte(key), t.db)
 }
 
+// All returns every key-value pair in this database as a map, streamed
+// concurrently from the underlying store.
 func (t *Storage) All() (map[string][]byte, error) {
 	m := make(map[string][]byte)
 	db := t.db
@@ -1138,6 +1193,8 @@ func (t *Storage) All() (map[string][]byte, error) {
 	return m, err
 }
 
+// ListDatabases returns the meta keys of all databases recorded in the meta
+// database. It returns an error if a key rotation is in progress.
 func ListDatabases() ([]string, error) {
 	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
@@ -1170,6 +1227,9 @@ func ListDatabases() ([]string, error) {
 	return dbList, err
 }
 
+// NewStorage wraps an already-open *badger.DB in a *Storage handle. The
+// resulting handle is not pool-managed, so its Close is a no-op; the caller
+// remains responsible for the underlying db's lifecycle.
 func NewStorage(db *badger.DB, path string, file string, key []byte, rotating bool) *Storage {
 	s := &Storage{
 		db:   db,
@@ -1181,6 +1241,7 @@ func NewStorage(db *badger.DB, path string, file string, key []byte, rotating bo
 	return s
 }
 
+// ListConfigurations returns the configuration persisted in the meta database.
 func ListConfigurations() (*Config, error) {
 	globalStateMu.RLock()
 	defer globalStateMu.RUnlock()
@@ -1201,6 +1262,8 @@ func ListConfigurations() (*Config, error) {
 	return config, nil
 }
 
+// UpdateConfigurations persists config to the meta database and, on success,
+// makes it the active in-memory configuration.
 func UpdateConfigurations(config *Config) error {
 	globalStateMu.Lock()
 	defer globalStateMu.Unlock()
@@ -1210,8 +1273,4 @@ func UpdateConfigurations(config *Config) error {
 		fxConfig = config
 	}
 	return err
-}
-
-func Cache(value []byte, duration time.Duration) error {
-	return nil
 }

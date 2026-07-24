@@ -8,6 +8,9 @@ import (
 	"github.com/dgraph-io/badger/v4"
 )
 
+// Storage is a handle to a single open database. It bundles the underlying
+// BadgerDB connection with its location and encryption key. Because it carries
+// an atomic field it must only be used by pointer and never copied.
 type Storage struct {
 	db   *badger.DB
 	path string
@@ -24,6 +27,7 @@ type Storage struct {
 	poolKey string
 }
 
+// Config holds the store-wide configuration persisted in the meta database.
 type Config struct {
 	StorePath   string `json:"store_path"`
 	SecureNewDb bool   `json:"secure_new_db"`
@@ -31,6 +35,8 @@ type Config struct {
 	MetaFile    string `json:"meta_file"`
 }
 
+// DbObject is the meta-database record describing one database: where it lives,
+// whether it is secure/active, and lifecycle timestamps (all in Unix millis).
 type DbObject struct {
 	DbPath      string `json:"db_path"`
 	DbFile      string `json:"db_file"`
@@ -44,14 +50,18 @@ type DbObject struct {
 var shutdownWG sync.WaitGroup
 var shutdownFlag int32
 
+// Event is an audit-log entry written to the meta database, recording an
+// operation type, a human-readable comment, and a Unix-millis timestamp.
 type Event struct {
 	Type    EventType `json:"type"`
 	Comment string    `json:"comment"`
 	TStamp  int64     `json:"tstamp"`
 }
 
+// EventType enumerates the kinds of events recorded in the audit log.
 type EventType int
 
+// Event types recorded in the audit log (the zero value is unused).
 const (
 	_ EventType = iota
 	EventTypeWrite
@@ -97,19 +107,24 @@ var (
 	connectionPoolOnce sync.Once
 )
 
+// EMetaKeyNotFound is returned when a lookup in the meta database finds no entry
+// for the requested key. It wraps the underlying badger.ErrKeyNotFound so
+// callers can match it with errors.Is / errors.As.
 type EMetaKeyNotFound struct {
 	Code    int
 	Message string
 	Wrapped error
 }
 
+// Error implements the error interface.
 func (e *EMetaKeyNotFound) Error() string {
 	if e.Wrapped != nil {
-		return fmt.Sprintf("%s (Code: %d)", e.Message, e.Code)
+		return fmt.Sprintf("%s (Code: %d)", e.Wrapped.Error(), e.Code)
 	}
 	return fmt.Sprintf("%s (Code: %d)", e.Message, e.Code)
 }
 
+// Unwrap returns the wrapped error, enabling errors.Is / errors.As.
 func (e *EMetaKeyNotFound) Unwrap() error {
 	return e.Wrapped
 }
@@ -122,7 +137,7 @@ func GetConnectionPool() *ConnectionPool {
 	return connectionPool
 }
 
-// ValidationError represents a validation failure with structured information - ADD THIS NEW TYPE
+// ValidationError represents a validation failure with structured information.
 type ValidationError struct {
 	Field   string `json:"field"`   // Which field/parameter failed validation
 	Code    int    `json:"code"`    // Numeric error code for categorization
@@ -130,7 +145,7 @@ type ValidationError struct {
 	Wrapped error  `json:"-"`       // Optional underlying error (not serialized to JSON)
 }
 
-// Error implements the standard error interface - REQUIRED FOR ERROR TYPE
+// Error implements the standard error interface.
 func (v *ValidationError) Error() string {
 	if v.Wrapped != nil {
 		return fmt.Sprintf("%s: %s (code: %d, wrapped: %v)", v.Field, v.Message, v.Code, v.Wrapped)

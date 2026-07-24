@@ -73,6 +73,8 @@ type SimpleMetricsCollector struct {
 	startTime time.Time
 }
 
+// NewSimpleMetricsCollector returns a SimpleMetricsCollector with its uptime
+// clock started at the current time.
 func NewSimpleMetricsCollector() *SimpleMetricsCollector {
 	return &SimpleMetricsCollector{
 		startTime: time.Now(),
