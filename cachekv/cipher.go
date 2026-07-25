@@ -9,9 +9,9 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log"
-	mrand "math/rand"
 	"os"
 	"path"
 	"strconv"
@@ -163,17 +163,17 @@ func hashFile(path string) (string, error) {
 	return strHash, nil
 }
 
-func extractString(source string, intendedLength int) (string, error) {
-	var paddingChars = []rune("#$%&^*0@!")
-	if intendedLength <= 0 {
-		return "", errors.New("invalid intended length, you are asking for the impossible")
+// deriveKeyFromHash generates a secure 32-byte key from hash bytes
+func deriveKeyFromHash(hashStr string) ([]byte, error) {
+	// Convert hex hash to bytes and take first 32 bytes for encryption key
+	hashBytes, err := hex.DecodeString(hashStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hash: %w", err)
 	}
-	if len(source) < intendedLength {
-		padding := make([]rune, intendedLength-len(source))
-		for i := range padding {
-			padding[i] = paddingChars[mrand.Intn(len(paddingChars))]
-		}
-		return source + string(padding), nil
+
+	if len(hashBytes) < keyLength {
+		return nil, errors.New("hash too short for encryption key")
 	}
-	return source[:intendedLength], nil
+
+	return hashBytes[:keyLength], nil
 }

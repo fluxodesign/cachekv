@@ -1,3 +1,13 @@
+// Package cachekv is an encrypted key-value store built on top of BadgerDB.
+//
+// It manages a set of named databases (secure or plain), a keyring that holds
+// each secure database's encryption key, and a meta database that records the
+// catalogue of databases, configuration, and an audit event log. Connections
+// are shared through a reference-counted connection pool (see ConnectionPool).
+//
+// Call Startup once to initialize or open the store, then use CreateDatabase,
+// InsertEntry, GetEntry, and friends to work with individual databases. Call
+// Shutdown for a graceful teardown.
 package cachekv
 
 import (
@@ -7,12 +17,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,13 +34,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// meta db stores the list of databases we have, etc.
+// StorePath is the directory under which all databases (including the meta DB)
+// are created, and KeyPath is the directory holding the keyring. Both may be
+// overridden before calling Startup.
 var (
-	StorePath   = "./store/"
-	KeyPath     = "./.private"
-	metaStorage Storage
-	keyStorage  Storage
-	fxConfig    *Config
+	StorePath = "./store/"
+	KeyPath   = "./.private"
 )
 
 const (
@@ -38,7 +49,22 @@ const (
 	service      = "fxstorage"
 )
 
+// Startup initializes the storage system. On first run (StorePath does not yet
+// exist) it creates the store directory and initializes the keyring and meta
+// databases; otherwise it opens the existing ones. It then validates the
+// configuration and records a startup event. Startup must be called before any
+// other operation. Fatal errors during initialization terminate the process.
 func Startup() {
+	ctx := context.Background()
+	atomic.StoreInt32(&shutdownFlag, shutdownFlagDefault)
+
+	// Initialize metrics collector first for startup monitoring
+	collectorMu.Lock()
+	metricsCollector = NewSimpleMetricsCollector()
+	collectorMu.Unlock()
+	startupStart := time.Now()
+
+	log.Println("Starting cachekv storage system...")
 	_, err := os.Stat(StorePath)
 	if err != nil && os.IsNotExist(err) {
 		syscall.Umask(0)
@@ -47,6 +73,10 @@ func Startup() {
 			log.Fatal("error creating store dir: ", err)
 			return
 		}
+
+		globalStateMu.Lock()
+		defer globalStateMu.Unlock()
+
 		err = initKeyDb()
 		if err != nil {
 			log.Fatal("error initializing keydb: ", err)
@@ -58,6 +88,9 @@ func Startup() {
 			return
 		}
 	} else {
+		globalStateMu.Lock()
+		defer globalStateMu.Unlock()
+
 		// load up the key db
 		err = openKeyDb()
 		if err != nil {
@@ -71,60 +104,94 @@ func Startup() {
 			return
 		}
 	}
+
+	// Perform comprehensive validation after initialization
+	config := DefaultConfig()
+	log.Println("Validating configuration and environment...")
+
+	err = ValidateConfiguration(ctx, config, true) // strict=true for startup
+	if err != nil {
+		log.Printf("Validation warnings: %v\n", err)
+	}
+
+	startupDuration := time.Since(startupStart)
+	metricsCollector.RecordLatency(ctx, "startup_init", startupDuration)
+
+	log.Printf("Startup complete in %v\n", startupDuration)
+	err = writeMetaEvent(EventTypeConfigChange, fmt.Sprintf("System started in %v", startupDuration))
+	if err != nil {
+		return
+	}
 }
 
+// loadMetaIdent returns the current meta identity snapshot, or a zero value if the
+// meta DB has not been initialised yet. Lock-free (see H2).
+func loadMetaIdent() metaIdent {
+	if p := metaIdentPtr.Load(); p != nil {
+		return *p
+	}
+	return metaIdent{}
+}
+
+// storeMetaIdent atomically publishes a new meta identity. Callers set the whole
+// identity at once so readers never observe a mismatched path/key.
+func storeMetaIdent(dir, file string, key []byte) {
+	metaIdentPtr.Store(&metaIdent{path: dir, file: file, key: key})
+}
+
+// metaPathAndKey returns the full path and encryption key of the active meta DB.
+func metaPathAndKey() (string, []byte) {
+	id := loadMetaIdent()
+	return path.Join(id.path, id.file), id.key
+}
+
+// DefaultConfig returns a Config populated from the current store paths and the
+// active meta file. It is used for validation at startup and as a baseline for
+// callers that have not persisted their own configuration.
 func DefaultConfig() *Config {
 	return &Config{
 		StorePath:   StorePath,
 		SecureNewDb: true,
 		MetaStore:   StorePath,
-		MetaFile:    metaStorage.file,
+		MetaFile:    loadMetaIdent().file,
 	}
 }
 
 func writeMetaEntry(key string, value []byte) error {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	metaPath, metaKey := metaPathAndKey()
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta db: ", err)
-		}
-	}(db)
+	defer pool.Release(metaPath)
 	err = setDbEntry([]byte(key), value, db)
 	return err
 }
 
 func getMetaEntry(key string) ([]byte, error) {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	metaPath, metaKey := metaPathAndKey()
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta db: ", err)
-		}
-	}(db)
+	defer pool.Release(metaPath)
 
 	value := make([]byte, 0)
 	err = db.View(func(txn *badger.Txn) error {
 		item, e := txn.Get([]byte(key))
 		if e != nil {
-			if strings.Contains(e.Error(), "not found") {
+			if errors.Is(e, badger.ErrKeyNotFound) {
 				e = &EMetaKeyNotFound{
 					Code:    8404,
-					Message: e.Error(),
+					Message: "meta key not found",
 					Wrapped: e,
 				}
 			}
@@ -144,7 +211,7 @@ func writeMetaEvent(eventType EventType, comment string) error {
 	event := Event{
 		Type:    eventType,
 		Comment: comment,
-		TSTamp:  now,
+		TStamp:  now,
 	}
 	key := prefixMetaEvent + strconv.FormatInt(now, 10)
 	value, err := json.Marshal(event)
@@ -154,6 +221,8 @@ func writeMetaEvent(eventType EventType, comment string) error {
 	return writeMetaEntry(key, value)
 }
 
+// WriteMetaConfig persists config to the meta database and records a
+// configuration-change event.
 func WriteMetaConfig(config *Config) error {
 	value, err := json.Marshal(config)
 	if err != nil {
@@ -203,48 +272,43 @@ func getMetaDbObject(dbName string) (*DbObject, error) {
 		return nil, err
 	}
 	dbo := &DbObject{}
-	err = json.Unmarshal(entry, dbo)
-	if err != nil {
+	if err = json.Unmarshal(entry, dbo); err != nil {
 		return nil, err
 	}
-	err = writeMetaEvent(EventTypeRead, "Read meta db object: "+prefixMetaDb+dbName)
-	return dbo, err
+	// Reads must not mutate state: emitting a meta event here caused an encrypted
+	// write on every data operation (GetEntry/InsertEntry/…) and made reads fail
+	// outright during key rotation (writeMetaEntry returns errDbRotating). See H1.
+	return dbo, nil
 }
 
+// WriteToKeyring stores value under key in the keyring database. It returns an
+// error if a key rotation is currently in progress.
 func WriteToKeyring(key string, value []byte) error {
-	if keyStorage.rotatingKey {
+	if keyStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
 	}
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
-	db, err := OpenDatabase(keyPath, keyStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(keyPath, keyStorage.key)
 	if err != nil {
 		return err
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing key db: ", err)
-		}
-	}(db)
+	defer pool.Release(keyPath)
 	err = setDbEntry([]byte(key), value, db)
 	return err
 }
 
 func getFromKeyring(key string) ([]byte, error) {
-	if keyStorage.rotatingKey {
+	if keyStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
-	db, err := OpenDatabase(keyPath, keyStorage.key)
+	pool := GetConnectionPool()
+	db, err := pool.Get(keyPath, keyStorage.key)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing key db: ", err)
-		}
-	}(db)
+	defer pool.Release(keyPath)
 
 	value := make([]byte, 0)
 	err = db.View(func(txn *badger.Txn) error {
@@ -274,10 +338,11 @@ func randomValues(length int) ([]byte, error) {
 }
 
 func checkMetaFile() bool {
-	if metaStorage.path == "" || metaStorage.file == "" {
+	id := loadMetaIdent()
+	if id.path == "" || id.file == "" {
 		return false
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	metaPath := path.Join(id.path, id.file)
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
 		return false
 	}
@@ -306,18 +371,18 @@ func initKeyDb() error {
 	if err != nil {
 		return err
 	}
-	extractedKey, err := extractString(hash, keyLength)
+	keyStorage.key, err = deriveKeyFromHash(hash)
 	if err != nil {
-		return err
+		return fmt.Errorf("error deriving key from hash: %v", err)
 	}
-	keyStorage.key = []byte(extractedKey)
 	keyPath := path.Join(keyStorage.path, keyStorage.file)
-	keyStorage.db, err = OpenDatabase(keyPath, keyStorage.key)
+	pool := GetConnectionPool()
+	keyStorage.db, err = pool.Get(keyPath, keyStorage.key)
 	if err != nil {
 		return err
 	}
-	err = CloseDatabase(keyStorage.db)
-	return err
+	pool.Release(keyPath)
+	return nil
 }
 
 func initMetaDb() error {
@@ -326,27 +391,25 @@ func initMetaDb() error {
 		log.Println("Error generating random values:", fErr)
 		return fErr
 	}
-	metaStorage.path = StorePath
-	metaStorage.file = "meta-" + string(fileKey)
-	metaStorage.key, fErr = randomValues(keyLength)
+	metaFile := "meta-" + string(fileKey)
+	metaKey, fErr := randomValues(keyLength)
 	if fErr != nil {
 		log.Println("Error generating random values:", fErr)
 		return fErr
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
+	storeMetaIdent(StorePath, metaFile, metaKey)
+	metaPath := path.Join(StorePath, metaFile)
+	pool := GetConnectionPool()
 	var err error
-	metaStorage.db, err = OpenDatabase(metaPath, metaStorage.key)
+	metaStorage.db, err = pool.Get(metaPath, metaKey)
 	if err != nil {
 		return err
 	}
-	fErr = WriteToKeyring(prefixMetaKey, metaStorage.key)
+	fErr = WriteToKeyring(prefixMetaKey, metaKey)
 	if fErr != nil {
 		log.Println("Error saving key file to keyring:", fErr)
 	}
-	err = CloseDatabase(metaStorage.db)
-	if err != nil {
-		return err
-	}
+	pool.Release(metaPath)
 	_ = writeMetaEvent(EventTypeWrite, "wrote keyring")
 	fxConfig = DefaultConfig()
 	err = WriteMetaConfig(fxConfig)
@@ -374,11 +437,16 @@ func openKeyDb() error {
 	if err != nil {
 		return err
 	}
-	extractedKey, err := extractString(hash, keyLength)
+	keyStorage.key, err = deriveKeyFromHash(hash)
 	if err != nil {
 		return err
 	}
-	keyStorage.key = []byte(extractedKey)
+	pool := GetConnectionPool()
+	keyStorage.db, err = pool.Get(keyPath, keyStorage.key)
+	if err != nil {
+		return err
+	}
+	pool.Release(keyPath)
 	return nil
 }
 
@@ -412,14 +480,19 @@ func openMetaDb() error {
 		}
 	}
 	if latestMetaTimestamp > 0 {
-		metaStorage.path = StorePath
-		metaStorage.file = latestMetaName
 		key, e := getFromKeyring(prefixMetaKey)
 		if e != nil {
-			log.Println("error reading keyring for meta key: ", err)
+			log.Println("error reading keyring for meta key: ", e)
+			return e
+		}
+		storeMetaIdent(StorePath, latestMetaName, key)
+		metaPath := path.Join(StorePath, latestMetaName)
+		pool := GetConnectionPool()
+		metaStorage.db, err = pool.Get(metaPath, key)
+		if err != nil {
 			return err
 		}
-		metaStorage.key = key
+		pool.Release(metaPath)
 	} else {
 		err = initMetaDb()
 		if err != nil {
@@ -432,7 +505,14 @@ func openMetaDb() error {
 	return err
 }
 
+// GetStorageObject opens the named database and returns a *Storage handle for
+// it, loading the encryption key from the keyring for secure databases. The
+// returned handle holds a connection-pool reference; the caller must call
+// Close on it when finished to release that reference.
 func GetStorageObject(dbName string) (*Storage, error) {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+
 	// we need to know 3 things:
 	// 1. does it have an entry in the meta storage?
 	// 2. does it have actual db folder in store path?
@@ -461,28 +541,29 @@ func GetStorageObject(dbName string) (*Storage, error) {
 			return nil, err
 		}
 	}
-	db, err := OpenDatabase(dbPath, b64Decoded)
+	db, err := GetConnectionPool().Get(dbPath, b64Decoded)
+	if err != nil {
+		log.Println("error opening database: ", err)
+		return nil, err
+	}
 	storageObject := &Storage{
-		db:          db,
-		path:        dbObject.DbPath,
-		file:        dbObject.DbFile,
-		key:         dbKey,
-		rotatingKey: false,
+		db:   db,
+		path: dbObject.DbPath,
+		file: dbObject.DbFile,
+		key:  dbKey,
+		// dbPath is exactly the key used for pool.Get above; Close releases it.
+		poolKey: dbPath,
 	}
 	return storageObject, nil
 }
 
 func openUnsecuredDb(path string) (*badger.DB, error) {
-	opt := badger.DefaultOptions(path)
-	opt.IndexCacheSize = 100 << 20
-	db, err := badger.Open(opt)
-	if err != nil {
-		log.Println("Error opening unsecured db:", err)
-		return nil, err
-	}
-	return db, nil
+	return GetConnectionPool().Get(path, nil)
 }
 
+// OpenDatabase opens the BadgerDB at path with the given encryption key (pass
+// nil for an unencrypted database) and returns the underlying handle. Most
+// callers should go through the connection pool rather than opening directly.
 func OpenDatabase(path string, key []byte) (*badger.DB, error) {
 	opt := badger.DefaultOptions(path).WithEncryptionKey(key).WithEncryptionKeyRotationDuration(24 * time.Hour)
 	opt.IndexCacheSize = 100 << 20
@@ -494,7 +575,14 @@ func OpenDatabase(path string, key []byte) (*badger.DB, error) {
 	return db, nil
 }
 
+// CloseDatabase closes the underlying BadgerDB handle directly. Prefer
+// pool.Release(path) for pool-managed connections; this is retained for handles
+// whose path is not readily available and for tests.
 func CloseDatabase(db *badger.DB) error {
+	// If the database is managed by the pool, we should really be using pool.Release(path).
+	// However, CloseDatabase is used in some places where we have a *badger.DB but not its path easily available,
+	// or in tests. For backward compatibility and safety, we still allow direct closing,
+	// but the pool will handle its own lifecycle.
 	return db.Close()
 }
 
@@ -522,34 +610,34 @@ func getDbEntry(key []byte, db *badger.DB) ([]byte, error) {
 		if err != nil {
 			return err
 		}
-		err = item.Value(func(val []byte) error {
+		e := item.Value(func(val []byte) error {
 			value = val
 			return nil
 		})
-		return err
+		return e
 	})
 	if err != nil {
 		log.Println("meta get error: ", err)
+		return nil, err
 	}
 	return value, err
 }
 
-func listDatabases() (map[string]*DbObject, error) {
-	if metaStorage.rotatingKey {
+func listDatabases() (map[string]DbObject, error) {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	metaPath, metaKey := metaPathAndKey()
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing meta db:", err)
-		}
-	}(db)
-	m := make(map[string]*DbObject)
+	defer pool.Release(metaPath)
+	m := make(map[string]DbObject)
 	err = db.View(func(txn *badger.Txn) error {
 		iterator := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer iterator.Close()
@@ -557,7 +645,7 @@ func listDatabases() (map[string]*DbObject, error) {
 		for iterator.Seek(prefix); iterator.ValidForPrefix(prefix); iterator.Next() {
 			item := iterator.Item()
 			key := string(item.Key())
-			var value *DbObject
+			var value DbObject
 			valError := item.Value(func(val []byte) error {
 				e := json.Unmarshal(val, &value)
 				return e
@@ -573,22 +661,20 @@ func listDatabases() (map[string]*DbObject, error) {
 }
 
 func metaBatchInsert(values *map[string][]byte) error {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return errors.New(errDbRotating)
 	}
 	var err error
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	metaStorage.db, err = OpenDatabase(metaPath, metaStorage.key)
+	metaPath, metaKey := metaPathAndKey()
+	pool := GetConnectionPool()
+	// Use a local handle rather than mutating the shared metaStorage.db, which was
+	// written here without holding globalStateMu (H2).
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta database: ", err)
-		}
-	}(metaStorage.db)
-	wb := metaStorage.db.NewWriteBatch()
+	defer pool.Release(metaPath)
+	wb := db.NewWriteBatch()
 	defer wb.Cancel()
 
 	for key, val := range *values {
@@ -600,7 +686,7 @@ func metaBatchInsert(values *map[string][]byte) error {
 	return wb.Flush()
 }
 
-func batchInsertGeneric(values *map[string][]byte, db *badger.DB) error {
+func batchInsertGeneric(ctx context.Context, values *map[string][]byte, db *badger.DB) error {
 	var err error
 	wb := db.NewWriteBatch()
 	defer wb.Cancel()
@@ -608,6 +694,14 @@ func batchInsertGeneric(values *map[string][]byte, db *badger.DB) error {
 		err = wb.Set([]byte(key), val)
 		if err != nil {
 			log.Println("error writing value to batch: ", err)
+			return err
+		}
+
+		// Check for context cancellation during batch build
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
 	}
 	return wb.Flush()
@@ -637,68 +731,106 @@ func countRecords(prefix string, db *badger.DB, verbose bool) (int, error) {
 }
 
 func copyMetas() (newPath string, newKey []byte, err error) {
-	if metaStorage.rotatingKey {
+	ctx := context.Background()
+	startTime := time.Now()
+
+	if metaStorage.rotatingKey.Load() {
 		return "", nil, errors.New("rotate flag already raised")
 	}
-	var e error
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	metaStorage.db, e = OpenDatabase(metaPath, metaStorage.key)
-	if e != nil {
-		return "", nil, e
+	srcIdent := loadMetaIdent()
+	metaPath := path.Join(srcIdent.path, srcIdent.file)
+	oldFile := srcIdent.file
+	pool := GetConnectionPool()
+	// Use a local handle rather than mutating the shared metaStorage.db (H2).
+	srcDb, err := pool.Get(metaPath, srcIdent.key)
+	if err != nil {
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
 	}
-	defer func(db *badger.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Println("Error closing meta database: ", err)
-		}
-	}(metaStorage.db)
+	defer pool.Release(metaPath)
 
-	metaStorage.rotatingKey = true
+	metaStorage.rotatingKey.Store(true)
+	// Always clear the flag on the way out, including the early error returns below.
+	defer metaStorage.rotatingKey.Store(false)
+
+	itemCount := 0
+	err = srcDb.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			itemCount++
+		}
+		return nil
+	})
+	if err != nil {
+		log.Println("Error counting items in meta database: ", err)
+	}
+
 	newMetaKey, _ := randomValues(keyLength)
 	metaFileRandom, _ := randomValues(10)
 	newMetaFile := "meta-" + string(metaFileRandom)
-	newDb, err := OpenDatabase(StorePath+newMetaFile, newMetaKey)
+	newMetaPath := path.Join(StorePath, newMetaFile)
+	newDb, err := pool.Get(newMetaPath, newMetaKey)
 	if err != nil {
 		log.Println("Error opening new meta database: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
 		return "", nil, err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing new meta database: ", err)
-		}
-	}(newDb)
+	defer pool.Release(newMetaPath)
 
 	values := make(map[string][]byte)
-	stream := metaStorage.db.NewStream()
+	stream := srcDb.NewStream()
 	stream.NumGo = 20
 	stream.ChooseKey = func(item *badger.Item) bool {
 		return bytes.HasPrefix(item.Key(), stream.Prefix)
 	}
 	stream.Send = func(buffer *z.Buffer) error {
 		var list pb.KVList
-		err = buffer.SliceIterate(func(slice []byte) error {
+		if serr := buffer.SliceIterate(func(slice []byte) error {
 			kv := new(pb.KV)
-			if err = proto.Unmarshal(slice, kv); err != nil {
-				return err
+			if uerr := proto.Unmarshal(slice, kv); uerr != nil {
+				return uerr
 			}
 			list.Kv = append(list.Kv, kv)
 			return nil
-		})
-		if err != nil {
-			return err
+		}); serr != nil {
+			return serr
 		}
 		for _, element := range list.Kv {
-			key := element.Key
-			value := element.Value
-			values[string(key)] = value
+			values[string(element.Key)] = element.Value
 		}
-		return err
+		return nil
 	}
-	err = stream.Orchestrate(context.Background())
-	err = batchInsertGeneric(&values, newDb)
-	metaStorage.rotatingKey = false
-	return newMetaFile, newMetaKey, err
+	// H3: check the stream error BEFORE writing. A failed read of the source data
+	// must not proceed to write a partial/empty new meta DB and report success.
+	if err = stream.Orchestrate(context.Background()); err != nil {
+		log.Println("Error streaming source meta database: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
+	}
+	if err = batchInsertGeneric(ctx, &values, newDb); err != nil {
+		log.Println("Error writing rotated meta database: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
+	}
+
+	// H3: commit the rotation. Persist the new meta key to the keyring first so a
+	// restart's openMetaDb (which reads prefixMetaKey) can open the newest meta dir,
+	// then atomically publish the new meta identity so readers pick it up lock-free.
+	if err = WriteToKeyring(prefixMetaKey, newMetaKey); err != nil {
+		log.Println("Error persisting rotated meta key to keyring: ", err)
+		metricsCollector.RecordOperation(ctx, "rotation", oldFile, time.Since(startTime), false)
+		return "", nil, err
+	}
+	storeMetaIdent(srcIdent.path, newMetaFile, newMetaKey)
+
+	duration := time.Since(startTime)
+	metricsCollector.RecordOperation(ctx, "rotation", newMetaFile, duration, true)
+	metricsCollector.RecordKeyRotation(oldFile, newMetaFile, itemCount)
+
+	log.Printf("Key rotation complete: %s -> %s (%d items in %v)\n",
+		oldFile, newMetaFile, itemCount, duration)
+	return newMetaFile, newMetaKey, nil
 }
 
 func b64Encode(input []byte) string {
@@ -726,40 +858,59 @@ func getDbKey(dbName string, dbObject *DbObject) ([]byte, error) {
 	return nil, nil
 }
 
+// CreateDatabase creates a new database named dbName. When secure is true a
+// random encryption key is generated and stored in the keyring. It returns an
+// error if a database with the same name already exists.
 func CreateDatabase(dbName string, secure bool) error {
+	ctx := context.Background()
+	startTime := time.Now()
+
 	// check first
 	exist, err := databaseExist(dbName)
 	if err != nil {
+		metricsCollector.RecordOperation(ctx, "check", dbName, time.Since(startTime), false)
 		return err
 	}
 	if exist {
-		return errors.New("database already exists")
+		err = errors.New("database already exists")
+		metricsCollector.RecordOperation(ctx, "check", dbName, time.Since(startTime), false)
+		return err
 	}
+
+	globalStateMu.RLock()
+	storePath := fxConfig.StorePath
+	globalStateMu.RUnlock()
+
 	// open db with name and optional key - store the key on keyring
 	dbId, _ := randomValues(fileIdLength)
 	dbActualName := dbName + "-" + string(dbId)
-	dbPath := path.Join(fxConfig.StorePath, dbActualName)
-	var db *badger.DB
+	dbPath := path.Join(storePath, dbActualName)
+	pool := GetConnectionPool()
 	if secure {
 		key, secErr := randomValues(keyLength)
 		if secErr != nil {
+			metricsCollector.RecordEncryptionError("key_generation_failed")
 			return secErr
 		}
-		db, secErr = OpenDatabase(dbPath, key)
+		_, secErr = pool.Get(dbPath, key)
 		if secErr != nil {
+			metricsCollector.RecordOperation(ctx, "open", dbName, time.Since(startTime), false)
 			return secErr
 		}
 		b64Key := b64Encode(key)
 		secErr = WriteToKeyring(prefixMetaDb+dbName, []byte(b64Key))
 		if secErr != nil {
+			metricsCollector.RecordOperation(ctx, "wrt-keyring", dbName, time.Since(startTime), false)
 			return secErr
 		}
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		_, err = pool.Get(dbPath, nil)
 		if err != nil {
+			metricsCollector.RecordOperation(ctx, "open", dbName, time.Since(startTime), false)
 			return err
 		}
 	}
+	defer pool.Release(dbPath)
 	// create a new DbObject struct and store it in meta db
 	dbObject := DbObject{
 		DbPath:      fxConfig.StorePath,
@@ -772,14 +923,26 @@ func CreateDatabase(dbName string, secure bool) error {
 	}
 	err = writeMetaDbObject(dbName, &dbObject, false)
 	if err != nil {
+		metricsCollector.RecordOperation(ctx, "wrt-meta", dbName, time.Since(startTime), false)
 		return err
 	}
-	err = CloseDatabase(db)
+	duration := time.Since(startTime)
+	success := err == nil
+
+	metricsCollector.RecordOperation(ctx, "create", dbName, duration, success)
+	if success {
+		metricsCollector.RecordDatabaseCreated(dbName)
+		log.Printf("Database %s created in %v\n", dbName, duration)
+	} else {
+		log.Printf("Failed to create database %s after %v: %v\n", dbName, duration, err)
+	}
 	return err
 }
 
 func databaseExist(dbName string) (bool, error) {
-	_, err := GetStorageObject(dbName)
+	// This is only an existence check; it doesn't keep the handle, so release the
+	// pool reference immediately rather than pinning the connection forever.
+	so, err := GetStorageObject(dbName)
 	if err != nil {
 		var metaKeyNotFound *EMetaKeyNotFound
 		if errors.As(err, &metaKeyNotFound) {
@@ -787,10 +950,22 @@ func databaseExist(dbName string) (bool, error) {
 		}
 		return false, err
 	}
+	so.Close()
 	return true, nil
 }
 
+// InsertEntry writes value under key in the named database, opening it (and
+// loading its key, if secure) as needed. It returns an error if the system is
+// shutting down or the database is inactive.
 func InsertEntry(dbName string, key string, value []byte) error {
+	ctx := context.Background()
+	startTime := time.Now()
+
+	// Check if we're shutting down
+	if IsShuttingDown() {
+		return errors.New("system is shutting down - operation rejected")
+	}
+
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
 		return err
@@ -803,35 +978,59 @@ func InsertEntry(dbName string, key string, value []byte) error {
 		return err
 	}
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+	pool := GetConnectionPool()
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return err
 	}
+	defer pool.Release(dbPath)
+
 	err = setDbEntry([]byte(key), value, db)
-	if err != nil {
-		return err
+	duration := time.Since(startTime)
+	success := err == nil
+	metricsCollector.RecordOperation(ctx, "write", dbName, duration, success)
+	if !success {
+		log.Printf("Write operation failed for %s:%s after %v\n", dbName, key, duration)
 	}
-	err = CloseDatabase(db)
 	return err
 }
 
+// Close releases this handle's connection-pool reference. Callers that obtain a
+// *Storage from GetStorageObject must call Close (typically via defer) when done,
+// otherwise the connection stays pinned and the pool can never reclaim it. It is
+// safe to call on a handle that is not pool-managed (poolKey == ""), and safe to
+// call more than once.
+func (t *Storage) Close() {
+	if t.poolKey == "" {
+		return
+	}
+	GetConnectionPool().Release(t.poolKey)
+	t.poolKey = ""
+}
+
+// InsertEntry writes value under key in this database.
 func (t *Storage) InsertEntry(key string, value []byte) error {
 	return setDbEntry([]byte(key), value, t.db)
 }
 
+// UpdateEntry writes value under key in the named database. It is an alias for
+// InsertEntry: writes are upserts.
 func UpdateEntry(dbName string, key string, value []byte) error {
 	return InsertEntry(dbName, key, value)
 }
 
+// UpdateEntry writes value under key in this database (an upsert).
 func (t *Storage) UpdateEntry(key string, value []byte) error {
 	return setDbEntry([]byte(key), value, t.db)
 }
 
+// RemoveEntry deletes key from the named database. It returns an error if the
+// database is inactive.
 func RemoveEntry(dbName string, key string) error {
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
@@ -845,15 +1044,18 @@ func RemoveEntry(dbName string, key string) error {
 		return err
 	}
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+	pool := GetConnectionPool()
+
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return err
 	}
+	defer pool.Release(dbPath)
 
 	err = db.Update(func(txn *badger.Txn) error {
 		return txn.Delete([]byte(key))
@@ -862,11 +1064,10 @@ func RemoveEntry(dbName string, key string) error {
 		return err
 	}
 	_ = writeMetaEvent(EventTypeDelete, "Deleted entry: "+dbName+":"+key)
-
-	err = CloseDatabase(db)
 	return err
 }
 
+// RemoveEntry deletes key from this database and records a delete event.
 func (t *Storage) RemoveEntry(key string) error {
 	err := t.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete([]byte(key))
@@ -876,7 +1077,10 @@ func (t *Storage) RemoveEntry(key string) error {
 
 }
 
+// BatchInsert writes all entries to the named database in a single batch. It
+// returns an error if the database is inactive.
 func BatchInsert(dbName string, entries map[string][]byte) error {
+	ctx := context.Background()
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
 		return err
@@ -889,32 +1093,45 @@ func BatchInsert(dbName string, entries map[string][]byte) error {
 		return err
 	}
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+
 	var db *badger.DB
+	pool := GetConnectionPool()
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return err
 	}
+	defer pool.Release(dbPath)
 
-	err = batchInsertGeneric(&entries, db)
+	err = batchInsertGeneric(ctx, &entries, db)
 	if err != nil {
 		return err
 	}
-
-	err = CloseDatabase(db)
 	return err
 }
 
+// BatchInsert writes all entries to this database in a single batch and records
+// a write event.
 func (t *Storage) BatchInsert(entries *map[string][]byte) error {
-	err := batchInsertGeneric(entries, t.db)
+	ctx := context.Background()
+	err := batchInsertGeneric(ctx, entries, t.db)
 	_ = writeMetaEvent(EventTypeWrite, "Wrote batch data to db: "+t.file)
 	return err
 }
 
+// GetEntry reads the value stored under key in the named database. It returns
+// an error if the system is shutting down or the database is inactive.
 func GetEntry(dbName string, key string) ([]byte, error) {
+	ctx := context.Background()
+	startTime := time.Now()
+
+	if IsShuttingDown() {
+		return nil, errors.New("system is shutting down - operation rejected")
+	}
+
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
 		return nil, err
@@ -928,27 +1145,33 @@ func GetEntry(dbName string, key string) ([]byte, error) {
 	}
 
 	dbPath := path.Join(dbObject.DbPath, dbObject.DbFile)
+	pool := GetConnectionPool()
 	var db *badger.DB
 	if dbObject.Secure {
-		db, err = OpenDatabase(dbPath, dbKey)
+		db, err = pool.Get(dbPath, dbKey)
 	} else {
-		db, err = openUnsecuredDb(dbPath)
+		db, err = pool.Get(dbPath, nil)
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer pool.Release(dbPath)
+
 	value, err := getDbEntry([]byte(key), db)
-	if err != nil {
-		return nil, err
-	}
-	err = CloseDatabase(db)
+	duration := time.Since(startTime)
+	success := err == nil
+
+	metricsCollector.RecordOperation(ctx, "read", dbName, duration, success)
 	return value, err
 }
 
+// GetEntry reads the value stored under key in this database.
 func (t *Storage) GetEntry(key string) ([]byte, error) {
 	return getDbEntry([]byte(key), t.db)
 }
 
+// All returns every key-value pair in this database as a map, streamed
+// concurrently from the underlying store.
 func (t *Storage) All() (map[string][]byte, error) {
 	m := make(map[string][]byte)
 	db := t.db
@@ -970,21 +1193,19 @@ func (t *Storage) All() (map[string][]byte, error) {
 	return m, err
 }
 
+// ListDatabases returns the meta keys of all databases recorded in the meta
+// database. It returns an error if a key rotation is in progress.
 func ListDatabases() ([]string, error) {
-	if metaStorage.rotatingKey {
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
-	metaPath := path.Join(metaStorage.path, metaStorage.file)
-	db, err := OpenDatabase(metaPath, metaStorage.key)
+	metaPath, metaKey := metaPathAndKey()
+	pool := GetConnectionPool()
+	db, err := pool.Get(metaPath, metaKey)
 	if err != nil {
 		return nil, err
 	}
-	defer func(db *badger.DB) {
-		err = db.Close()
-		if err != nil {
-			log.Println("Error closing meta database: ", err)
-		}
-	}(db)
+	defer pool.Release(metaPath)
 	var dbList []string
 	err = db.View(func(txn *badger.Txn) error {
 		iterator := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -1006,18 +1227,26 @@ func ListDatabases() ([]string, error) {
 	return dbList, err
 }
 
+// NewStorage wraps an already-open *badger.DB in a *Storage handle. The
+// resulting handle is not pool-managed, so its Close is a no-op; the caller
+// remains responsible for the underlying db's lifecycle.
 func NewStorage(db *badger.DB, path string, file string, key []byte, rotating bool) *Storage {
-	return &Storage{
-		db:          db,
-		path:        path,
-		file:        file,
-		key:         key,
-		rotatingKey: rotating,
+	s := &Storage{
+		db:   db,
+		path: path,
+		file: file,
+		key:  key,
 	}
+	s.rotatingKey.Store(rotating)
+	return s
 }
 
+// ListConfigurations returns the configuration persisted in the meta database.
 func ListConfigurations() (*Config, error) {
-	if metaStorage.rotatingKey {
+	globalStateMu.RLock()
+	defer globalStateMu.RUnlock()
+
+	if metaStorage.rotatingKey.Load() {
 		return nil, errors.New(errDbRotating)
 	}
 
@@ -1033,14 +1262,15 @@ func ListConfigurations() (*Config, error) {
 	return config, nil
 }
 
+// UpdateConfigurations persists config to the meta database and, on success,
+// makes it the active in-memory configuration.
 func UpdateConfigurations(config *Config) error {
+	globalStateMu.Lock()
+	defer globalStateMu.Unlock()
+
 	err := WriteMetaConfig(config)
 	if err == nil {
 		fxConfig = config
 	}
 	return err
-}
-
-func Cache(value []byte, duration time.Duration) error {
-	return nil
 }
