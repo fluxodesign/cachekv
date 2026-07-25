@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,76 @@ func (n *NoOpMetricsCollector) RecordLatency(ctx context.Context, operation stri
 }
 func (n *NoOpMetricsCollector) Close() error { return nil }
 
+// latencyRingSize bounds how many recent latency samples are kept for
+// percentile calculation. Older samples are overwritten in place, so
+// percentiles reflect the most recent window rather than the entire
+// process lifetime (the mean, tracked separately via a running sum/count,
+// does cover the entire lifetime).
+const latencyRingSize = 1024
+
+// latencyStats tracks an exact running mean (via atomic sum/count) plus a
+// bounded recent-sample window used to estimate p50/p95/p99. It avoids an
+// external histogram dependency at the cost of percentiles being windowed
+// rather than exact-over-all-time.
+type latencyStats struct {
+	count atomic.Uint64
+	sum   atomic.Uint64 // nanoseconds
+	last  atomic.Int64  // nanoseconds of the most recently recorded sample
+
+	mu      sync.Mutex
+	samples [latencyRingSize]int64
+	next    int
+	filled  bool
+}
+
+func (l *latencyStats) record(d time.Duration) {
+	ns := d.Nanoseconds()
+	l.count.Add(1)
+	l.sum.Add(uint64(ns))
+	l.last.Store(ns)
+
+	l.mu.Lock()
+	l.samples[l.next] = ns
+	l.next++
+	if l.next == latencyRingSize {
+		l.next = 0
+		l.filled = true
+	}
+	l.mu.Unlock()
+}
+
+func (l *latencyStats) mean() time.Duration {
+	c := l.count.Load()
+	if c == 0 {
+		return 0
+	}
+	return time.Duration(l.sum.Load() / c)
+}
+
+// percentiles returns the p50, p95, and p99 latency over the current sample
+// window using nearest-rank interpolation.
+func (l *latencyStats) percentiles() (p50, p95, p99 time.Duration) {
+	l.mu.Lock()
+	n := l.next
+	if l.filled {
+		n = latencyRingSize
+	}
+	if n == 0 {
+		l.mu.Unlock()
+		return 0, 0, 0
+	}
+	snapshot := make([]int64, n)
+	copy(snapshot, l.samples[:n])
+	l.mu.Unlock()
+
+	sort.Slice(snapshot, func(i, j int) bool { return snapshot[i] < snapshot[j] })
+	rank := func(p float64) time.Duration {
+		idx := int(p * float64(len(snapshot)-1))
+		return time.Duration(snapshot[idx])
+	}
+	return rank(0.50), rank(0.95), rank(0.99)
+}
+
 // SimpleMetricsCollector provides basic in-memory metrics tracking with counters and timers
 type SimpleMetricsCollector struct {
 	// Operation counters (atomic for thread safety)
@@ -66,8 +137,8 @@ type SimpleMetricsCollector struct {
 	// Database lifecycle
 	dbCount atomic.Int64
 
-	// Latency tracking (simple moving average)
-	lastOpDuration atomic.Int64
+	// Latency tracking: exact mean plus windowed p50/p95/p99.
+	latency latencyStats
 
 	// Startup time for uptime calculation
 	startTime time.Time
@@ -82,7 +153,7 @@ func NewSimpleMetricsCollector() *SimpleMetricsCollector {
 }
 
 func (m *SimpleMetricsCollector) RecordOperation(ctx context.Context, op string, dbName string, duration time.Duration, success bool) {
-	m.lastOpDuration.Store(duration.Nanoseconds())
+	m.latency.record(duration)
 
 	switch op {
 	case "create":
@@ -119,7 +190,7 @@ func (m *SimpleMetricsCollector) RecordEncryptionError(reason string) {
 func (m *SimpleMetricsCollector) RecordMemoryUsage(bytesUsed uint64)                    {}
 func (m *SimpleMetricsCollector) RecordGCStats(gcCount uint32, pauseTime time.Duration) {}
 func (m *SimpleMetricsCollector) RecordLatency(ctx context.Context, operation string, duration time.Duration) {
-	m.lastOpDuration.Store(duration.Nanoseconds())
+	m.latency.record(duration)
 }
 
 func (m *SimpleMetricsCollector) Close() error { return nil }
@@ -133,12 +204,16 @@ type Metrics struct {
 	Deletes         uint64        `json:"deletes"`
 	Errors          uint64        `json:"errors"`
 	DatabasesActive int64         `json:"databases_active"`
-	AverageLatency  time.Duration `json:"average_latency"`
+	MeanLatency     time.Duration `json:"mean_latency"`
+	P50Latency      time.Duration `json:"p50_latency"`
+	P95Latency      time.Duration `json:"p95_latency"`
+	P99Latency      time.Duration `json:"p99_latency"`
 	Uptime          time.Duration `json:"uptime"`
 }
 
 // GetMetrics returns current metrics snapshot
 func (m *SimpleMetricsCollector) GetMetrics() Metrics {
+	p50, p95, p99 := m.latency.percentiles()
 	return Metrics{
 		TotalOperations: m.opsCreated.Load() + m.opsRead.Load() +
 			m.opsWrite.Load() + m.opsDelete.Load(),
@@ -148,7 +223,10 @@ func (m *SimpleMetricsCollector) GetMetrics() Metrics {
 		Deletes:         m.opsDelete.Load(),
 		Errors:          m.opsError.Load(),
 		DatabasesActive: m.dbCount.Load(),
-		AverageLatency:  time.Duration(m.lastOpDuration.Load()),
+		MeanLatency:     m.latency.mean(),
+		P50Latency:      p50,
+		P95Latency:      p95,
+		P99Latency:      p99,
 		Uptime:          time.Since(m.startTime),
 	}
 }
@@ -264,7 +342,7 @@ func writeShutdownEvent(ctx context.Context) {
 
 	m := GetMetricsCollector()
 	if m != nil {
-		lastOpDur := m.(*SimpleMetricsCollector).lastOpDuration.Load()
+		lastOpDur := m.(*SimpleMetricsCollector).latency.last.Load()
 		if lastOpDur > 0 {
 			m.RecordLatency(ctx, "shutdown_final_op", time.Duration(lastOpDur))
 		}

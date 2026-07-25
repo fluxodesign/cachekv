@@ -93,6 +93,19 @@ func TestDifferentEncryptionKeys(t *testing.T) {
 	assert.Nil(t, db)
 }
 
+// TestEmptyKeyRejectedForOpenEncryptedDb guards against C3: requesting an
+// already-open encrypted database with no key must fail the same way a wrong
+// key does, rather than silently returning the encrypted connection.
+func TestEmptyKeyRejectedForOpenEncryptedDb(t *testing.T) {
+	defer setup()()
+	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)
+	pool := GetConnectionPool()
+
+	db, err := pool.Get(metaPath, nil)
+	assert.NotNil(t, err)
+	assert.Nil(t, db)
+}
+
 func TestCopyMetasTwoRecords(t *testing.T) {
 	defer setup()()
 	metaPath := path.Join(loadMetaIdent().path, loadMetaIdent().file)

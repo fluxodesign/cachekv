@@ -63,23 +63,17 @@ func (p *ConnectionPool) Get(dbPath string, key []byte) (*badger.DB, error) {
 
 	entry := p.storages[dbPath]
 	if entry != nil && !entry.db.IsClosed() {
-		// If an encryption key is provided, Badger will fail to open if it doesn't match the existing one.
-		// However, if the DB is already open, we should check if the provided key matches the one it was opened with.
-		// Since Badger doesn't expose the key easily, and our pool assumes one connection per path,
-		// we try to "re-open" it conceptually by calling OpenDatabase, which will fail if the key is wrong.
-		// But if it's already open, we can't really "re-open" it to check the key without closing it.
-		// The requirement of TestDifferentEncryptionKeys is to verify that opening with a wrong key fails.
-
-		// If the DB is already open, and a key is provided, we check if it matches the encryption key of the open DB.
-		// Badger options contain the EncryptionKey.
-		// Note: We only check if BOTH have keys. If one doesn't, we skip this check and let Badger handle it if it tries to re-open.
-		// However, in our pool, if it's already open, we assume it's the same DB.
-		// TestDifferentEncryptionKeys expects a failure when a different key is provided for an ALREADY OPEN DB.
-		if len(key) > 0 {
-			opts := entry.db.Opts()
-			if len(opts.EncryptionKey) > 0 && !bytes.Equal(key, opts.EncryptionKey) {
-				return nil, errors.New("encryption key mismatch for already open database")
-			}
+		// Badger doesn't let us "re-open" an already-open DB to verify a key, so we
+		// compare against the key it was actually opened with (exposed via Opts()).
+		// This must run unconditionally, not just when the caller supplies a
+		// non-empty key: an empty key against a DB that was opened encrypted is
+		// itself a mismatch, and skipping the check there would silently hand back
+		// an encrypted connection to a caller that provided no key at all.
+		// bytes.Equal treats nil and empty slices as equal, so unencrypted databases
+		// (both sides empty) are unaffected.
+		opts := entry.db.Opts()
+		if !bytes.Equal(key, opts.EncryptionKey) {
+			return nil, errors.New("encryption key mismatch for already open database")
 		}
 
 		entry.refCount++
