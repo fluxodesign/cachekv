@@ -73,6 +73,70 @@ func main() {
 Configuration persisted in the meta database can be read and updated at runtime
 with `ListConfigurations` and `UpdateConfigurations`.
 
+## gRPC server and CLI
+
+`cmd/cachekv-server` exposes the package API over gRPC, and `cmd/cachekv-cli`
+talks to it.
+
+> **No TLS, no authentication.** The server listens in plaintext and accepts any
+> caller. Only run it on a trusted network or loopback interface.
+
+```bash
+go run ./cmd/cachekv-server --listen :50051 --store-path ./store --key-path ./.private
+```
+
+The CLI takes its global flags *before* the subcommand:
+
+```bash
+cachekv-cli [--addr host:port] [--json] [--timeout 30s] <command> [arguments]
+```
+
+`--addr` defaults to `$CACHEKV_ADDR`, then `localhost:50051`.
+
+| Command | Description |
+| --- | --- |
+| `db create <name> [--secure]` | Create a database, optionally encrypted |
+| `db list` | List database names |
+| `put <db> <key> <value>` | Insert a new entry |
+| `update <db> <key> <value>` | Overwrite an existing entry |
+| `rm <db> <key>` | Remove an entry |
+| `batch-insert <db> --file entries.json` | Insert many entries in one call |
+| `get <db> <key>` | Print one value |
+| `all <db>` | Stream every entry as `key<TAB>value` |
+| `config get` | Print the persisted configuration |
+| `config set <json-file>` | Patch the persisted configuration |
+| `metrics` | Print the server's metrics snapshot |
+| `ping` | Check that the server answers |
+
+`batch-insert --file` (or `--file -` for stdin) reads an array of entries;
+`encoding` is optional and defaults to `utf8`:
+
+```json
+[
+  {"key": "alpha", "value": "one"},
+  {"key": "beta", "value": "AQIDBA==", "encoding": "base64"}
+]
+```
+
+`config set` takes only the keys you want to change — omitted keys keep their
+current server-side value:
+
+```bash
+echo '{"secure_new_db": true}' | cachekv-cli config set -
+```
+
+With `--json`, commands print one JSON object; `all` prints one object per line
+so it can be consumed while the stream is still running. Values that are not
+valid UTF-8 come back base64-encoded, tagged by an `encoding` field (and prefixed
+`base64:` in plain-text output). Exit status is `0` on success, `2` for a usage
+error, and `1` for anything else.
+
+Regenerate the protobuf code after editing `proto/cachekv/v1/cachekv.proto`:
+
+```bash
+make proto
+```
+
 ## Notes
 
 - Secure databases are encrypted with a per-database key stored in the keyring;
