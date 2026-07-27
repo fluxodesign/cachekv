@@ -197,10 +197,11 @@ func getMetaEntry(key string) ([]byte, error) {
 			}
 			return e
 		}
-		e = item.Value(func(val []byte) error {
-			value = val
-			return nil
-		})
+		// ValueCopy, not item.Value: the slice handed to a Value callback aliases
+		// badger's internal buffers and is only valid for the life of the
+		// transaction, but value escapes it. Passing the pre-allocated slice as
+		// the destination keeps a zero-length result non-nil.
+		value, e = item.ValueCopy(value)
 		return e
 	})
 	return value, err
@@ -316,10 +317,9 @@ func getFromKeyring(key string) ([]byte, error) {
 		if e != nil {
 			return e
 		}
-		e = item.Value(func(val []byte) error {
-			value = val
-			return nil
-		})
+		// Copy out of the transaction — see getMetaEntry. This one matters most:
+		// the escaping slice is an encryption key.
+		value, e = item.ValueCopy(value)
 		return e
 	})
 	return value, err
@@ -610,11 +610,9 @@ func getDbEntry(key []byte, db *badger.DB) ([]byte, error) {
 		if err != nil {
 			return err
 		}
-		e := item.Value(func(val []byte) error {
-			value = val
-			return nil
-		})
-		return e
+		// Copy out of the transaction — see getMetaEntry.
+		value, err = item.ValueCopy(value)
+		return err
 	})
 	if err != nil {
 		log.Println("meta get error: ", err)
@@ -1032,6 +1030,13 @@ func (t *Storage) UpdateEntry(key string, value []byte) error {
 // RemoveEntry deletes key from the named database. It returns an error if the
 // database is inactive.
 func RemoveEntry(dbName string, key string) error {
+	ctx := context.Background()
+	startTime := time.Now()
+
+	if IsShuttingDown() {
+		return errors.New("system is shutting down - operation rejected")
+	}
+
 	dbObject, err := getMetaDbObject(dbName)
 	if err != nil {
 		return err
@@ -1060,6 +1065,9 @@ func RemoveEntry(dbName string, key string) error {
 	err = db.Update(func(txn *badger.Txn) error {
 		return txn.Delete([]byte(key))
 	})
+	duration := time.Since(startTime)
+	success := err == nil
+	metricsCollector.RecordOperation(ctx, "remove_entry", dbName, duration, success)
 	if err != nil {
 		return err
 	}

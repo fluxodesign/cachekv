@@ -471,6 +471,67 @@ func TestInsertAndGetEntry(t *testing.T) {
 	assert.Equal(t, string(dataValue), string(getValue))
 }
 
+// The slice handed to an item.Value callback is only valid inside the
+// transaction, so every read path must copy out of it. Two conditions have to
+// line up for badger to hand back a live window rather than a scratch buffer:
+// the value must exceed the 1MB ValueThreshold (smaller ones are copied into a
+// per-Item buffer), and the database must be unencrypted (decryption allocates
+// a fresh buffer). When they do, the slice points into the value log's mmap,
+// which is released the moment Value returns — so retaining it lets a caller
+// read memory badger has moved on from, and write straight through into the
+// value log. The meta and keyring stores are always encrypted, so their reads
+// are covered here for the contract rather than for a live hazard.
+func TestReadsDoNotAliasStoreMemory(t *testing.T) {
+	defer setup()()
+
+	// Above badger's ValueThreshold, so the value goes to the value log.
+	original := make([]byte, 2<<20)
+	for i := range original {
+		original[i] = byte(i)
+	}
+	stored := make([]byte, len(original))
+	copy(stored, original)
+
+	assertIndependentCopy := func(name string, read func() ([]byte, error)) {
+		t.Helper()
+		got, err := read()
+		assert.Nil(t, err, name)
+		assert.Equal(t, original, got, name)
+
+		// If got aliases the store, this scribbles over badger's own memory.
+		for i := range got {
+			got[i] = 0xff
+		}
+		reread, err := read()
+		assert.Nil(t, err, name)
+		assert.Equal(t, original, reread, name)
+	}
+
+	plainDb := "aliasdb"
+	assert.Nil(t, CreateDatabase(plainDb, false))
+	assert.Nil(t, InsertEntry(plainDb, "dataKey", stored))
+	assertIndependentCopy("getDbEntry", func() ([]byte, error) {
+		return GetEntry(plainDb, "dataKey")
+	})
+
+	secureDb := "aliasdb-secure"
+	assert.Nil(t, CreateDatabase(secureDb, true))
+	assert.Nil(t, InsertEntry(secureDb, "dataKey", stored))
+	assertIndependentCopy("getDbEntry (secure)", func() ([]byte, error) {
+		return GetEntry(secureDb, "dataKey")
+	})
+
+	assert.Nil(t, writeMetaEntry("aliaskey", stored))
+	assertIndependentCopy("getMetaEntry", func() ([]byte, error) {
+		return getMetaEntry("aliaskey")
+	})
+
+	assert.Nil(t, WriteToKeyring("aliaskeyring", stored))
+	assertIndependentCopy("getFromKeyring", func() ([]byte, error) {
+		return getFromKeyring("aliaskeyring")
+	})
+}
+
 func TestInsertAndUpdateEntry(t *testing.T) {
 	defer setup()()
 	testDb1 := "testdb1"
