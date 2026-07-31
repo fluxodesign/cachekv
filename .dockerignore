@@ -1,0 +1,37 @@
+# Local state that must never be baked into an image: store/ holds live
+# databases and .private/ holds the keyring that decrypts them.
+store/
+.private/
+
+# Host build output — the image builds its own binaries.
+bin/
+
+# vendor/ is untracked and may be stale; the build resolves modules from
+# go.mod/go.sum instead (see -mod=mod in the Dockerfile).
+vendor/
+
+.git/
+.gitignore
+.dockerignore
+.idea/
+.vscode/
+.claude/
+
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+
+README.md
+LICENSE
+reviews/
+*.md
+
+# Test and coverage artifacts
+*_test.go
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+.env
