@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -25,7 +24,7 @@ func main() {
 	select {
 	case <-sigChan:
 		log.Println("Received shutdown signal, initiating shutdown...")
-		showMetrics()
+		cachekv.ShowMetrics()
 		e := cachekv.Shutdown(shutdownCtx, 30*time.Second)
 		if e != nil {
 			log.Printf("Shutdown error: %v\n", e)
@@ -34,22 +33,4 @@ func main() {
 		}
 	}
 	os.Exit(0)
-}
-
-func showMetrics() {
-	metrics := cachekv.GetMetricsCollector().(*cachekv.SimpleMetricsCollector).GetMetrics()
-
-	fmt.Println("\n=== Final Metrics Report ===")
-	fmt.Printf("Total Operations: %d\n", metrics.TotalOperations)
-	fmt.Printf("  - Created:     %d\n", metrics.Created)
-	fmt.Printf("  - Reads:       %d\n", metrics.Reads)
-	fmt.Printf("  - Writes:      %d\n", metrics.Writes)
-	fmt.Printf("  - Deletes:     %d\n", metrics.Deletes)
-	fmt.Printf("  - Errors:      %d\n", metrics.Errors)
-	fmt.Printf("\nActive Databases: %d\n", metrics.DatabasesActive)
-	fmt.Printf("Mean Latency:     %v\n", metrics.MeanLatency)
-	fmt.Printf("P50 Latency:      %v\n", metrics.P50Latency)
-	fmt.Printf("P95 Latency:      %v\n", metrics.P95Latency)
-	fmt.Printf("P99 Latency:      %v\n", metrics.P99Latency)
-	fmt.Printf("Uptime:           %v\n", metrics.Uptime)
 }

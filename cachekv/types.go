@@ -152,3 +152,21 @@ func (v *ValidationError) Error() string {
 	}
 	return fmt.Sprintf("%s: %s (code: %d)", v.Field, v.Message, v.Code)
 }
+
+func ShowMetrics() {
+	metrics := GetMetricsCollector().(*SimpleMetricsCollector).GetMetrics()
+
+	fmt.Println("\n=== Final Metrics Report ===")
+	fmt.Printf("Total Operations: %d\n", metrics.TotalOperations)
+	fmt.Printf("  - Created:     %d\n", metrics.Created)
+	fmt.Printf("  - Reads:       %d\n", metrics.Reads)
+	fmt.Printf("  - Writes:      %d\n", metrics.Writes)
+	fmt.Printf("  - Deletes:     %d\n", metrics.Deletes)
+	fmt.Printf("  - Errors:      %d\n", metrics.Errors)
+	fmt.Printf("\nActive Databases: %d\n", metrics.DatabasesActive)
+	fmt.Printf("Mean Latency:     %v\n", metrics.MeanLatency)
+	fmt.Printf("P50 Latency:      %v\n", metrics.P50Latency)
+	fmt.Printf("P95 Latency:      %v\n", metrics.P95Latency)
+	fmt.Printf("P99 Latency:      %v\n", metrics.P99Latency)
+	fmt.Printf("Uptime:           %v\n", metrics.Uptime)
+}
