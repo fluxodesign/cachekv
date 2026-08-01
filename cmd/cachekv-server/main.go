@@ -4,7 +4,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -141,7 +144,9 @@ func main() {
 	os.Exit(0)
 }
 
-// handleConnection deals with network I/O and parsing.
+// handleConnection deals with network I/O and RESP parsing. Commands are read
+// one at a time and funnelled into cmdChan, so replies leave in the same order
+// the client sent its requests.
 func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand) {
 	defer func(conn net.Conn) {
 		err := conn.Close()
@@ -149,32 +154,53 @@ func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand) {
 			log.Printf("Error closing connection: %v\n", err)
 		}
 	}(conn)
-	scanner := bufio.NewScanner(conn)
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	reader := newRespReader(conn)
+	writer := bufio.NewWriter(conn)
+	// One channel for the whole connection: this loop never has more than a
+	// single command in flight. Buffered by 1 so the processor doesn't block.
+	respChan := make(chan string, 1)
 
-		// Simple parsing (for production, use a proper RESP protocol parser)
-		parts := strings.Fields(line)
-		if len(parts) == 0 {
-			continue
-		}
-
-		// Create the command and its dedicated response channel
-		cmd := CkvCommand{
-			Op:   strings.ToUpper(parts[0]),
-			Args: parts[1:],
-			Resp: make(chan string, 1), // Buffered by 1 so processor doesn't block
-		}
-
-		// Send command to the single thread
-		cmdChan <- cmd
-
-		// Wait for the response and write it back to the client
-		response := <-cmd.Resp
-		_, err := conn.Write([]byte(response))
+	for {
+		args, err := reader.ReadCommand()
 		if err != nil {
+			// On a protocol error the stream is out of sync, so tell the
+			// client what happened and hang up. Everything else (EOF, reset)
+			// means the connection is already gone.
+			var protoErr protocolError
+			switch {
+			case errors.As(err, &protoErr):
+				_, _ = fmt.Fprintf(writer, "-ERR Protocol error: %s\r\n", protoErr)
+				_ = writer.Flush()
+			case errors.Is(err, io.EOF), errors.Is(err, net.ErrClosed):
+			default:
+				log.Printf("Error reading from %s: %v\n", conn.RemoteAddr(), err)
+			}
+			return
+		}
+
+		cmd := CkvCommand{
+			Op:   strings.ToUpper(args[0]),
+			Args: args[1:],
+			Resp: respChan,
+		}
+
+		// Send command to the single thread, then wait for its response.
+		cmdChan <- cmd
+		response := <-respChan
+
+		if _, err := writer.WriteString(response); err != nil {
 			log.Printf("Error writing response to connection: %v\n", err)
+			return
+		}
+		// Hold the reply back only while further pipelined commands are
+		// already buffered, so a batch leaves in one write while an
+		// interactive client still gets an immediate answer.
+		if reader.Buffered() == 0 {
+			if err := writer.Flush(); err != nil {
+				log.Printf("Error flushing response to connection: %v\n", err)
+				return
+			}
 		}
 	}
 }
