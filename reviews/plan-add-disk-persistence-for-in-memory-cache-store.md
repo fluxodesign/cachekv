@@ -141,3 +141,49 @@ fire-and-forget) every tick.
   the process, confirm the values reappear (via `GET`/`HGET` after restart).
 - `SIGTERM` immediately after a write (before the next tick fires) and confirm
   the shutdown-triggered forced save still persisted it.
+
+
+# The Rest of Redis Commands (not yet implemented)
+
+Implemented today (`datastore.go:78-85`): `PING`, `GET`, `SET`, `HSET`, `HGET`, `SADD` — plus `SAVE`, which isn't in the registry but is reachable by clients since `stateProcessor` intercepts it before the lookup (`datastore.go:26`).
+
+Everything below is missing. I've grouped by what it would cost to add, since that matters more than the raw list.
+
+## Work with the `Datastore` you already have
+
+These only need new handlers over the existing `Strings`/`Hashes`/`Sets` maps.
+
+| Group | Missing |
+|---|---|
+| Strings | `GETSET`, `GETDEL`, `APPEND`, `STRLEN`, `SETNX`, `SETRANGE`, `GETRANGE`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `MSET`, `MSETNX`, `MGET` |
+| Hashes | `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HGETALL`, `HMSET`, `HMGET`, `HSETNX`, `HINCRBY`, `HINCRBYFLOAT`, `HSTRLEN`, `HRANDFIELD` |
+| Sets | `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER`, `SMOVE`, `SUNION`, `SINTER`, `SDIFF`, `SUNIONSTORE`, `SINTERSTORE`, `SDIFFSTORE`, `SINTERCARD` |
+| Keyspace | `DEL`, `UNLINK`, `EXISTS`, `KEYS`, `RENAME`, `RENAMENX`, `RANDOMKEY`, `TYPE`, `DBSIZE`, `FLUSHDB`, `FLUSHALL`, `COPY` |
+| Server/admin | `BGSAVE`, `LASTSAVE`, `INFO`, `TIME`, `ECHO`, `DEBUG`, `RESET` |
+
+Two caveats inside this "cheap" tier:
+
+- **`DEL`/`HDEL`/`SREM` are not actually cheap** — they're the exact trigger the persistence plan defers at `plan-add-disk-persistence-for-in-memory-cache-store.md:104-109`. `saveToDisk` is a `BatchInsert`, which only upserts, so a deleted key stays on disk and comes back on the next restart. Adding any delete command means keyset diffing + `RemoveEntry` first, or the deletion silently un-deletes itself.
+- **`TYPE`, `KEYS`, `DEL`, `EXISTS`, `RENAME`, `COPY` all assume one keyspace.** Your three maps let `foo` exist independently as a string, a hash, and a set (same doc, lines 110-113). Every cross-type command needs that resolved first — either unify into `map[string]*value{type, data}`, or define which map wins.
+
+## Need new machinery
+
+**Expiry — nothing exists.** `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `EXPIRETIME`, `SETEX`, `PSETEX`, `GETEX`. This also means your current `SET` is quietly wrong for a real client: `setCommand` (`datastore.go:94`) reads `args[0]`/`args[1]` and ignores the rest, so `SET k v EX 10 NX` succeeds, sets no expiry, and doesn't honour `NX`. Redis would reply `+OK` or `$-1` depending on `NX`. Worth rejecting unknown `SET` options until they're supported.
+
+**Missing data types.** Lists (`LPUSH`/`RPUSH`/`LPOP`/`RPOP`/`LRANGE`/`LLEN`/`LREM`/`LSET`/`LINSERT`/`LTRIM`/`LMOVE`/`BLPOP`), sorted sets (`ZADD`/`ZSCORE`/`ZRANGE`/`ZRANGEBYSCORE`/`ZRANK`/`ZREM`/`ZINCRBY`/`ZCARD`/`ZCOUNT`), and further out streams, bitmaps (`SETBIT`/`GETBIT`/`BITCOUNT`), HyperLogLog, geo. Each needs a map on `Datastore` plus a prefix in `persistence.go` (`s:`/`h:`/`z:` are taken — note `z:` is already used for *sets*, which will collide with the conventional meaning if you add sorted sets).
+
+**Iteration.** `SCAN`, `HSCAN`, `SSCAN`, `ZSCAN` need a stable cursor over Go maps, whose iteration order is deliberately randomised. Non-trivial.
+
+**Blocking, pub/sub, transactions, scripting.** `BLPOP`/`BRPOP`/`WAIT`; `SUBSCRIBE`/`PUBLISH`/`PSUBSCRIBE`; `MULTI`/`EXEC`/`DISCARD`/`WATCH`; `EVAL`/`FUNCTION`. All of these break the one-command-in-flight assumption in `handleConnection` — a blocked client currently blocks the connection goroutine while holding nothing, and pub/sub needs the server to push unsolicited replies, which the request/response loop has no path for.
+
+## Connection-level commands worth doing first
+
+Now that the parser is real, these are what actual clients send and what you'll hit immediately:
+
+`COMMAND` (and `COMMAND DOCS`/`COMMAND COUNT`), `HELLO`, `QUIT`, `SELECT`, `AUTH`, `CLIENT` (`SETNAME`/`GETNAME`/`ID`/`LIST`), `CONFIG GET`/`SET`, `SHUTDOWN`.
+
+`redis-cli` sends `COMMAND DOCS` on connect and `HELLO 3` if you ask for RESP3; both currently get `-ERR unknown command`. `redis-cli` tolerates that and still works, but many library clients don't — `HELLO` failing is a hard connect error for several of them. `QUIT` (reply `+OK`, close) and `SELECT 0` (reply `+OK`, ignore) are two-line handlers with outsized compatibility payoff.
+
+## One security note
+
+`SAVE` is client-reachable, unauthenticated, and synchronous — it blocks the single `stateProcessor` goroutine for the whole `BatchInsert` (doc lines 114-117). Anyone who can reach port 6379 can stall the entire server in a loop. Redis gates this behind `AUTH` and `protected-mode`; you have neither yet. `AUTH` plus binding to localhost by default is probably the higher priority than any command on the lists above.
