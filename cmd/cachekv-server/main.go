@@ -38,7 +38,12 @@ func main() {
 	saveMinChanges := flag.Int("save-min-changes", 1, "minimum number of writes since the last save before a save-interval tick actually persists to disk")
 	storePath := flag.String("store-path", cachekv.StorePath, "directory for cachekv's databases")
 	keyPath := flag.String("key-path", cachekv.KeyPath, "directory for cachekv's keyring")
+	onKeyCollision := flag.String("on-key-collision", collisionPolicyWarn, "policy when a persisted key collides across types on load: warn (log and purge the losing values) or fail (log and refuse to start)")
 	flag.Parse()
+
+	if *onKeyCollision != collisionPolicyWarn && *onKeyCollision != collisionPolicyFail {
+		log.Fatalf("invalid --on-key-collision %q: must be %q or %q", *onKeyCollision, collisionPolicyWarn, collisionPolicyFail)
+	}
 
 	cachekv.StorePath = *storePath
 	cachekv.KeyPath = *keyPath
@@ -62,7 +67,7 @@ func main() {
 		if err := cachekv.CreateDatabase(*persistDb, false); err != nil && !strings.Contains(err.Error(), "already exists") {
 			log.Fatalf("failed to create persist database %s: %v", *persistDb, err)
 		}
-		store, err := loadFromDisk(*persistDb)
+		store, err := loadFromDisk(*persistDb, *onKeyCollision)
 		if err != nil {
 			log.Printf("failed to load persisted cache store %s, starting empty: %v\n", *persistDb, err)
 			store = NewDatastore()

@@ -2,6 +2,65 @@ package main
 
 import "fmt"
 
+type valueType uint8
+
+const (
+	typeString valueType = iota
+	typeHash
+	typeSet
+)
+
+// String is the reply for the TYPE command and the wording used in collision
+// logs.
+func (t valueType) String() string {
+	switch t {
+	case typeString:
+		return "string"
+	case typeHash:
+		return "hash"
+	case typeSet:
+		return "set"
+	default:
+		return "unknown"
+	}
+}
+
+// prefix is the persisted-key prefix for this type (see persistence.go)
+func (t valueType) prefix() string {
+	switch t {
+	case typeString:
+		return stringPrefix
+	case typeHash:
+		return hashPrefix
+	case typeSet:
+		return setPrefix
+	default:
+		return ""
+	}
+}
+
+// value is one entry in the keyspace: a type tag plus exactly one populated
+// payload, chosen by that tag. The other payloads are always nil/zero.
+type value struct {
+	kind valueType
+	str  string
+	hash map[string]string
+	set  map[string]struct{}
+}
+
+// newEmptyValue builds a zero-value payload of kind, with the payload map
+// initialised so handlers can write into it directly.
+func newEmptyValue(kind valueType) *value {
+	v := &value{kind: kind}
+	switch kind {
+	case typeHash:
+		v.hash = make(map[string]string)
+	case typeSet:
+		v.set = make(map[string]struct{})
+	}
+	return v
+}
+
 type CkvCommand struct {
 	Op   string
 	Args []string
@@ -34,11 +93,11 @@ func stateProcessor(cmdChannel <-chan CkvCommand, store *Datastore, persistDbNam
 					if err != nil {
 						cmd.Resp <- fmt.Sprintf("-ERR save failed: %v\r\n", err)
 					} else {
-						cmd.Resp <- "+OK\r\n"
+						cmd.Resp <- okReply
 					}
 				}
 			} else if cmd.Resp != nil {
-				cmd.Resp <- "+OK\r\n"
+				cmd.Resp <- okReply
 			}
 			continue
 		}
@@ -58,18 +117,64 @@ func stateProcessor(cmdChannel <-chan CkvCommand, store *Datastore, persistDbNam
 	}
 }
 
+// Datastore is the unified keyspace: each key holds exactly one value of
+// exactly one type, matching Redis semantics.
 type Datastore struct {
-	Strings map[string]string
-	Hashes  map[string]map[string]string
-	Sets    map[string]map[string]struct{}
+	keys map[string]*value
+
+	// stale holds persisted keys (already prefixed) whose in-memory value is
+	// gone because the key changed type. saveToDisk removes them, since
+	// BatchInsert only upserts. Not part of snapshot.
+	stale map[string]struct{}
 }
 
 func NewDatastore() *Datastore {
 	return &Datastore{
-		Strings: make(map[string]string),
-		Hashes:  make(map[string]map[string]string),
-		Sets:    make(map[string]map[string]struct{}),
+		keys:  make(map[string]*value),
+		stale: make(map[string]struct{}),
 	}
+}
+
+// lookup returns the value at key when it holds kind. found is false when the
+// key is absent. errReply is a non-empty RESP error when the key exists with
+// a different kind, in which case the caller returns it verbatim.
+func (d *Datastore) lookup(key string, kind valueType) (v *value, found bool, errReply string) {
+	v, found = d.keys[key]
+	if !found {
+		return nil, false, ""
+	}
+	if v.kind != kind {
+		return nil, false, errWrongType
+	}
+	return v, true, ""
+}
+
+// mutable returns the value at key, creating an empty one of kind if absent.
+// errReply is non-empty (WRONGTYPE) when the key exists with a different
+// kind, in which case nothing is created.
+func (d *Datastore) mutable(key string, kind valueType) (v *value, errReply string) {
+	existing, found := d.keys[key]
+	if found {
+		if existing.kind != kind {
+			return nil, errWrongType
+		}
+		return existing, ""
+	}
+	v = newEmptyValue(kind)
+	d.keys[key] = v
+	delete(d.stale, kind.prefix()+key)
+	return v, ""
+}
+
+// replace stores v at key whatever was there before, recording the previous
+// kind's persisted key as stale when the kind changed. This is SET's
+// type-agnostic overwrite.
+func (d *Datastore) replace(key string, v *value) {
+	if old, found := d.keys[key]; found && old.kind != v.kind {
+		d.stale[old.kind.prefix()+key] = struct{}{}
+	}
+	d.keys[key] = v
+	delete(d.stale, v.kind.prefix()+key)
 }
 
 type CommandHandler func(store *Datastore, args []string) string
@@ -82,82 +187,101 @@ var commandRegistry = map[string]CommandHandler{
 	"HSET": hsetCommand,
 	"HGET": hgetCommand,
 	"SADD": saddCommand,
+	"TYPE": typeCommand,
 }
 
 func pingCommand(store *Datastore, args []string) string {
 	if len(args) > 0 {
-		return fmt.Sprintf("$%d\r\n%s\r\n", len(args[0]), args[0])
+		return bulkString(args[0])
 	}
-	return "+PONG\r\n"
+	return pongReply
 }
 
 func setCommand(store *Datastore, args []string) string {
 	if len(args) < 2 {
-		return "-ERR wrong number of arguments for 'set' command\r\n"
+		return wrongArgs("set")
 	}
-	store.Strings[args[0]] = args[1]
-	return "+OK\r\n"
+	store.replace(args[0], &value{kind: typeString, str: args[1]})
+	return okReply
 }
 
 func getCommand(store *Datastore, args []string) string {
 	if len(args) < 1 {
-		return "-ERR wrong number of arguments for 'get' command\r\n"
+		return wrongArgs("get")
 	}
-	val, exists := store.Strings[args[0]]
-	if !exists {
-		return "$-1\r\n" // Redis standard for (nil)
+	v, found, errReply := store.lookup(args[0], typeString)
+	if errReply != "" {
+		return errReply
 	}
-	return fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
+	if !found {
+		return nilBulk
+	}
+	return bulkString(v.str)
 }
 
 func hsetCommand(store *Datastore, args []string) string {
 	if len(args) < 3 {
-		return "-ERR wrong number of arguments for 'hset' command\r\n"
+		return wrongArgs("hset")
 	}
 	key, field, val := args[0], args[1], args[2]
 
-	// Initialize the inner map if it doesn't exist
-	if store.Hashes[key] == nil {
-		store.Hashes[key] = make(map[string]string)
+	v, errReply := store.mutable(key, typeHash)
+	if errReply != "" {
+		return errReply
 	}
 
-	store.Hashes[key][field] = val
+	v.hash[field] = val
 	return ":1\r\n" // Integer reply indicating 1 field was added
 }
 
 func hgetCommand(store *Datastore, args []string) string {
 	if len(args) < 2 {
-		return "-ERR wrong number of arguments for 'hget' command\r\n"
+		return wrongArgs("hget")
 	}
 	key, field := args[0], args[1]
 
-	fields, exists := store.Hashes[key]
-	if !exists {
-		return "$-1\r\n" // Redis standard for (nil)
+	v, found, errReply := store.lookup(key, typeHash)
+	if errReply != "" {
+		return errReply
 	}
-	val, exists := fields[field]
-	if !exists {
-		return "$-1\r\n" // Redis standard for (nil)
+	if !found {
+		return nilBulk
 	}
-	return fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
+	val, exists := v.hash[field]
+	if !exists {
+		return nilBulk
+	}
+	return bulkString(val)
+}
+
+func typeCommand(store *Datastore, args []string) string {
+	if len(args) < 1 {
+		return wrongArgs("type")
+	}
+	v, found := store.keys[args[0]]
+	if !found {
+		return noneReply
+	}
+	return "+" + v.kind.String() + "\r\n"
 }
 
 func saddCommand(store *Datastore, args []string) string {
 	if len(args) < 2 {
-		return "-ERR wrong number of arguments for 'sadd' command\r\n"
+		return wrongArgs("sadd")
 	}
 	key, members := args[0], args[1:]
 
-	if store.Sets[key] == nil {
-		store.Sets[key] = make(map[string]struct{})
+	v, errReply := store.mutable(key, typeSet)
+	if errReply != "" {
+		return errReply
 	}
 
 	added := 0
 	for _, member := range members {
-		if _, exists := store.Sets[key][member]; !exists {
-			store.Sets[key][member] = struct{}{}
+		if _, exists := v.set[member]; !exists {
+			v.set[member] = struct{}{}
 			added++
 		}
 	}
-	return fmt.Sprintf(":%d\r\n", added) // Integer reply of members added
+	return integer(added) // Integer reply of members added
 }
