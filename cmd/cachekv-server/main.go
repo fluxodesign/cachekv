@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +40,7 @@ func main() {
 	persistDb := flag.String("persist-db", "cachestore", "cachekv database name used to persist the in-memory cache store to disk")
 	saveInterval := flag.Duration("save-interval", 60*time.Second, "how often to check whether the in-memory cache store should be saved to disk")
 	saveMinChanges := flag.Int("save-min-changes", 1, "minimum number of writes since the last save before a save-interval tick actually persists to disk")
+	activeExpireInterval := flag.Duration("active-expire-interval", time.Second, "how often to sweep the cache store for keys past their TTL, so an untouched expired key doesn't sit in memory (and get re-persisted) forever")
 	storePath := flag.String("store-path", cachekv.StorePath, "directory for cachekv's databases")
 	keyPath := flag.String("key-path", cachekv.KeyPath, "directory for cachekv's keyring")
 	onKeyCollision := flag.String("on-key-collision", collisionPolicyWarn, "policy when a persisted key collides across types on load: warn (log and purge the losing values) or fail (log and refuse to start)")
@@ -75,10 +77,16 @@ func main() {
 			log.Printf("failed to load persisted cache store %s, starting empty: %v\n", *persistDb, err)
 			store = NewDatastore()
 		}
+		// CONFIG GET save should report the rule actually in effect, not the
+		// static placeholder NewDatastore() seeds it with.
+		store.config["save"] = fmt.Sprintf("%d %d", int(saveInterval.Seconds()), *saveMinChanges)
 
 		cmdChannel = make(chan CkvCommand)
 		go stateProcessor(cmdChannel, store, *persistDb, *saveMinChanges)
 		go runPeriodicSave(*saveInterval, cmdChannel)
+		go runActiveExpire(*activeExpireInterval, cmdChannel)
+
+		registry := newClientRegistry()
 
 		go func() {
 			log.Printf("cachekv-server (cache store) listening on %s\n", *cacheStoreAddr)
@@ -91,7 +99,12 @@ func main() {
 				// Each connection gets its own goroutine so slow or idle
 				// clients never block others; all of them funnel commands
 				// into the single cmdChannel processed by stateProcessor.
-				go handleConnection(conn, cmdChannel, *requirePass)
+				go handleConnection(conn, cmdChannel, *requirePass, registry, func() {
+					// SHUTDOWN reuses the exact graceful path a real SIGTERM
+					// already triggers below (grpc drain -> forced save ->
+					// cachekv.Shutdown), rather than duplicating it.
+					_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+				})
 			}
 		}()
 	}
@@ -152,16 +165,27 @@ func main() {
 	os.Exit(0)
 }
 
+// connState is per-connection state that neither Datastore nor stateProcessor
+// have any business tracking: authentication, the connection's registry id,
+// and its CLIENT SETNAME name. Shared by handleAuth/handleHello/handleClient.
+type connState struct {
+	authenticated bool
+	id            int64
+	name          string
+}
+
 // handleConnection deals with network I/O and RESP parsing. Commands are read
 // one at a time and funnelled into cmdChan, so replies leave in the same order
 // the client sent its requests.
 //
-// requirePass, when non-empty, gates every command but AUTH itself behind a
-// per-connection authenticated flag: AUTH is handled entirely here (it never
-// touches cmdChan/Datastore, since auth is connection-local state that the
-// single shared stateProcessor goroutine has no business tracking), and every
-// other command is rejected with NOAUTH until it succeeds.
-func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand, requirePass string) {
+// requirePass, when non-empty, gates every command but AUTH/HELLO/QUIT behind
+// a per-connection authenticated flag — the same minimal pre-auth allowlist
+// real Redis itself uses. AUTH, HELLO and CLIENT are all handled entirely
+// here rather than via commandRegistry (they never touch cmdChan/Datastore),
+// since they need either per-connection state the single shared
+// stateProcessor goroutine has no business tracking, or (QUIT, SHUTDOWN)
+// effects on the connection/process that a Datastore command can't express.
+func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand, requirePass string, registry *clientRegistry, triggerShutdown func()) {
 	defer func(conn net.Conn) {
 		err := conn.Close()
 		if err != nil {
@@ -169,13 +193,16 @@ func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand, requirePass stri
 		}
 	}(conn)
 
+	entry := registry.register(conn.RemoteAddr().String(), conn.LocalAddr().String())
+	defer registry.unregister(entry.id)
+
 	reader := newRespReader(conn)
 	writer := bufio.NewWriter(conn)
 	// One channel for the whole connection: this loop never has more than a
 	// single command in flight. Buffered by 1 so the processor doesn't block.
 	respChan := make(chan string, 1)
 
-	authenticated := requirePass == ""
+	state := &connState{authenticated: requirePass == "", id: entry.id}
 
 	for {
 		args, err := reader.ReadCommand()
@@ -200,9 +227,23 @@ func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand, requirePass stri
 		var response string
 		switch {
 		case op == "AUTH":
-			response = handleAuth(requirePass, args[1:], &authenticated)
-		case !authenticated:
+			response = handleAuth(requirePass, args[1:], state)
+		case op == "HELLO":
+			response = handleHello(requirePass, args[1:], state)
+		case op == "QUIT":
+			_, _ = writer.WriteString(okReply)
+			_ = writer.Flush()
+			return
+		case op == "RESET":
+			response = handleReset(requirePass, state, registry)
+		case !state.authenticated:
 			response = errNoAuth
+		case op == "CLIENT":
+			response = handleClient(args[1:], state, registry)
+		case op == "SHUTDOWN":
+			log.Printf("cache store: SHUTDOWN received from %s, triggering graceful shutdown", conn.RemoteAddr())
+			triggerShutdown()
+			return
 		default:
 			cmd := CkvCommand{Op: op, Args: args[1:], Resp: respChan}
 			// Send command to the single thread, then wait for its response.
@@ -228,7 +269,7 @@ func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand, requirePass stri
 
 // handleAuth implements the AUTH command, run before commandRegistry and
 // without ever touching cmdChan — see handleConnection's doc comment for why.
-func handleAuth(requirePass string, args []string, authenticated *bool) string {
+func handleAuth(requirePass string, args []string, state *connState) string {
 	if requirePass == "" {
 		return "-ERR Client sent AUTH, but no password is set.\r\n"
 	}
@@ -236,13 +277,110 @@ func handleAuth(requirePass string, args []string, authenticated *bool) string {
 		return wrongArgs("auth")
 	}
 	if passwordsEqual(args[0], requirePass) {
-		*authenticated = true
+		state.authenticated = true
 		return okReply
 	}
 	// A previously-authenticated connection that sends a wrong password is
 	// re-gated: AUTH always re-validates, it doesn't just check once.
-	*authenticated = false
+	state.authenticated = false
 	return "-ERR invalid password\r\n"
+}
+
+// handleHello implements HELLO [protover] [AUTH password] [SETNAME name].
+// Real RESP3 (maps, doubles, booleans, push types) isn't implemented
+// anywhere in resp.go, so whatever protover the client asks for, the reply
+// always reports proto 2 — a client that respects that field falls back to
+// RESP2 parsing, which is all this server ever writes.
+// handleReset implements RESET: connection-plane like AUTH/HELLO/CLIENT,
+// pre-auth exempt like QUIT/HELLO (matches real Redis). Only resets what's
+// actually meaningful today — authentication and the CLIENT SETNAME name —
+// since MULTI/WATCH/pub-sub don't exist yet to reset.
+func handleReset(requirePass string, state *connState, registry *clientRegistry) string {
+	state.authenticated = requirePass == ""
+	state.name = ""
+	registry.setName(state.id, "")
+	return "+RESET\r\n"
+}
+
+func handleHello(requirePass string, args []string, state *connState) string {
+	i := 0
+	if i < len(args) {
+		if _, err := strconv.Atoi(args[i]); err != nil || (args[i] != "2" && args[i] != "3") {
+			return "-NOPROTO unsupported protocol version\r\n"
+		}
+		i++
+	}
+
+	for i < len(args) {
+		switch strings.ToUpper(args[i]) {
+		case "AUTH":
+			if i+2 >= len(args) {
+				return wrongArgs("hello")
+			}
+			// Username is accepted and ignored: one shared password, no ACL
+			// — same model plain AUTH already uses.
+			if requirePass == "" || !passwordsEqual(args[i+2], requirePass) {
+				return "-WRONGPASS invalid username-password pair or user is disabled.\r\n"
+			}
+			state.authenticated = true
+			i += 3
+		case "SETNAME":
+			if i+1 >= len(args) {
+				return wrongArgs("hello")
+			}
+			state.name = args[i+1]
+			i += 2
+		default:
+			return errSyntax
+		}
+	}
+
+	if requirePass != "" && !state.authenticated {
+		return errNoAuth
+	}
+
+	return arrayReply(
+		bulkString("server"), bulkString("cachekv"),
+		bulkString("version"), bulkString("0.1.0"),
+		bulkString("proto"), integer(2),
+		bulkString("id"), integer(int(state.id)),
+		bulkString("mode"), bulkString("standalone"),
+		bulkString("role"), bulkString("master"),
+		bulkString("modules"), emptyArray,
+	)
+}
+
+// handleClient implements CLIENT ID/GETNAME/SETNAME/LIST.
+func handleClient(args []string, state *connState, registry *clientRegistry) string {
+	if len(args) == 0 {
+		return wrongArgs("client")
+	}
+	switch strings.ToUpper(args[0]) {
+	case "ID":
+		return integer(int(state.id))
+	case "GETNAME":
+		return bulkString(state.name)
+	case "SETNAME":
+		if len(args) != 2 {
+			return wrongArgs("client|setname")
+		}
+		name := args[1]
+		if strings.ContainsAny(name, " \n\r") {
+			return "-ERR Client names cannot contain spaces, newlines or special characters.\r\n"
+		}
+		state.name = name
+		registry.setName(state.id, name)
+		return okReply
+	case "LIST":
+		if len(args) != 1 {
+			// Redis's ID/TYPE filters aren't supported — fail loud rather
+			// than silently returning an unfiltered list.
+			return errSyntax
+		}
+		return bulkString(registry.list())
+	default:
+		return fmt.Sprintf("-ERR Unknown CLIENT subcommand or wrong number of arguments for '%s'\r\n", args[0])
+	}
 }
 
 // passwordsEqual reports whether a and b match, comparing in constant time

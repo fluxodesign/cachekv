@@ -23,7 +23,7 @@ func TestReconcileThreeWayCollisionPrefersString(t *testing.T) {
 		setPrefix + "x":    mustJSON(t, []string{"m"}),
 	}
 
-	store, losers, skipped := reconcile(entries)
+	store, losers, skipped, _ := reconcile(entries)
 
 	require.Contains(t, store.keys, "x")
 	assert.Equal(t, typeString, store.keys["x"].kind)
@@ -39,9 +39,9 @@ func TestReconcileIsDeterministic(t *testing.T) {
 		setPrefix + "x":    mustJSON(t, []string{"m"}),
 	}
 
-	_, wantLosers, wantSkipped := reconcile(entries)
+	_, wantLosers, wantSkipped, _ := reconcile(entries)
 	for i := 0; i < 20; i++ {
-		store, losers, skipped := reconcile(entries)
+		store, losers, skipped, _ := reconcile(entries)
 		assert.Equal(t, typeString, store.keys["x"].kind)
 		assert.Equal(t, wantLosers, losers)
 		assert.Equal(t, wantSkipped, skipped)
@@ -54,7 +54,7 @@ func TestReconcileHashOverSetCollision(t *testing.T) {
 		setPrefix + "x":  mustJSON(t, []string{"m"}),
 	}
 
-	store, losers, skipped := reconcile(entries)
+	store, losers, skipped, _ := reconcile(entries)
 
 	require.Contains(t, store.keys, "x")
 	assert.Equal(t, typeHash, store.keys["x"].kind)
@@ -69,7 +69,7 @@ func TestReconcileSkipsUnknownPrefixAndUndecodableEntries(t *testing.T) {
 		setPrefix + "z":  []byte("not json"), // undecodable
 	}
 
-	store, losers, skipped := reconcile(entries)
+	store, losers, skipped, _ := reconcile(entries)
 
 	assert.Empty(t, store.keys)
 	assert.Empty(t, losers)
@@ -83,7 +83,7 @@ func TestReconcileNoCollisionKeepsSingleEntry(t *testing.T) {
 		setPrefix + "c":    mustJSON(t, []string{"m"}),
 	}
 
-	store, losers, skipped := reconcile(entries)
+	store, losers, skipped, _ := reconcile(entries)
 
 	assert.Len(t, store.keys, 3)
 	assert.Empty(t, losers)
@@ -96,7 +96,7 @@ func TestDescribeCollisionsNamesWinnerAndDroppedSizesPerKey(t *testing.T) {
 		hashPrefix + "x":   mustJSON(t, map[string]string{"f": "v"}), // 9 bytes
 		setPrefix + "x":    mustJSON(t, []string{"m"}),               // 5 bytes
 	}
-	store, losers, _ := reconcile(entries)
+	store, losers, _, _ := reconcile(entries)
 	require.Equal(t, []string{hashPrefix + "x", setPrefix + "x"}, losers)
 
 	lines := describeCollisions(store, entries, losers)
@@ -116,7 +116,7 @@ func TestDescribeCollisionsOneLinePerCollidingKey(t *testing.T) {
 		stringPrefix + "b": []byte("v2"),
 		setPrefix + "b":    mustJSON(t, []string{"m"}),
 	}
-	store, losers, _ := reconcile(entries)
+	store, losers, _, _ := reconcile(entries)
 
 	lines := describeCollisions(store, entries, losers)
 
@@ -128,4 +128,100 @@ func TestDescribeCollisionsOneLinePerCollidingKey(t *testing.T) {
 func TestDescribeCollisionsEmptyWhenNoLosers(t *testing.T) {
 	store := NewDatastore()
 	assert.Empty(t, describeCollisions(store, nil, nil))
+}
+
+func TestSnapshotReconcileRoundTripsTTL(t *testing.T) {
+	store := NewDatastore()
+	store.keys["k"] = &value{kind: typeString, str: "v", expireAt: 1234567890123}
+	store.keys["nottl"] = &value{kind: typeString, str: "v2"}
+
+	entries := snapshot(store)
+	assert.Contains(t, entries, expirePrefix+"k")
+	assert.NotContains(t, entries, expirePrefix+"nottl")
+
+	reconciled, losers, skipped, orphanedExpiry := reconcile(entries)
+	require.Contains(t, reconciled.keys, "k")
+	assert.Equal(t, int64(1234567890123), reconciled.keys["k"].expireAt)
+	assert.Zero(t, reconciled.keys["nottl"].expireAt)
+	assert.Empty(t, losers)
+	assert.Empty(t, skipped)
+	assert.Empty(t, orphanedExpiry)
+}
+
+func TestReconcileOrphanedExpiryEntryHasNoLiveKey(t *testing.T) {
+	entries := map[string][]byte{
+		expirePrefix + "gone": []byte("1234567890123"),
+	}
+
+	store, losers, skipped, orphanedExpiry := reconcile(entries)
+
+	assert.Empty(t, store.keys)
+	assert.Empty(t, losers)
+	assert.Empty(t, skipped)
+	assert.Equal(t, []string{expirePrefix + "gone"}, orphanedExpiry)
+
+	// Confirm this never reaches describeCollisions's store.keys[name].kind
+	// dereference the way a type-collision loser would.
+	assert.NotPanics(t, func() { describeCollisions(store, entries, losers) })
+}
+
+func TestReconcileUnparseableExpiryEntryIsSkipped(t *testing.T) {
+	entries := map[string][]byte{
+		expirePrefix + "k": []byte("not a number"),
+	}
+
+	store, losers, skipped, orphanedExpiry := reconcile(entries)
+
+	assert.Empty(t, store.keys)
+	assert.Empty(t, losers)
+	assert.Empty(t, orphanedExpiry)
+	assert.Equal(t, []string{expirePrefix + "k"}, skipped)
+}
+
+func TestSnapshotReconcileRoundTripsList(t *testing.T) {
+	store := NewDatastore()
+	store.keys["k"] = &value{kind: typeList, list: []string{"c", "b", "a"}}
+
+	entries := snapshot(store)
+	assert.Contains(t, entries, listPrefix+"k")
+
+	reconciled, losers, skipped, _ := reconcile(entries)
+	require.Contains(t, reconciled.keys, "k")
+	assert.Equal(t, typeList, reconciled.keys["k"].kind)
+	assert.Equal(t, []string{"c", "b", "a"}, reconciled.keys["k"].list)
+	assert.Empty(t, losers)
+	assert.Empty(t, skipped)
+}
+
+func TestSnapshotReconcileRoundTripsZSet(t *testing.T) {
+	store := NewDatastore()
+	store.keys["k"] = &value{kind: typeZSet, zset: map[string]float64{"a": 1.5, "b": 2}}
+
+	entries := snapshot(store)
+	assert.Contains(t, entries, zsetPrefix+"k")
+
+	reconciled, losers, skipped, _ := reconcile(entries)
+	require.Contains(t, reconciled.keys, "k")
+	assert.Equal(t, typeZSet, reconciled.keys["k"].kind)
+	assert.Equal(t, map[string]float64{"a": 1.5, "b": 2}, reconciled.keys["k"].zset)
+	assert.Empty(t, losers)
+	assert.Empty(t, skipped)
+}
+
+func TestReconcileSkipsUndecodableListAndZSetEntries(t *testing.T) {
+	entries := map[string][]byte{
+		listPrefix + "l": []byte("not json"),
+		zsetPrefix + "z": []byte("not json"),
+	}
+
+	store, losers, skipped, _ := reconcile(entries)
+
+	assert.Empty(t, store.keys)
+	assert.Empty(t, losers)
+	assert.Equal(t, []string{listPrefix + "l", zsetPrefix + "z"}, skipped)
+}
+
+func TestTypeFromPrefixRecognizesListAndZSet(t *testing.T) {
+	assert.Equal(t, typeList, typeFromPrefix(listPrefix))
+	assert.Equal(t, typeZSet, typeFromPrefix(zsetPrefix))
 }
