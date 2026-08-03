@@ -800,6 +800,48 @@ func TestDbObjectInsertEntry(t *testing.T) {
 	assert.Nil(t, byteEntry)
 }
 
+func TestDbObjectRemoveEntries(t *testing.T) {
+	defer setup()()
+	assert.Nil(t, CreateDatabase("testdb", true))
+	storageObject, err := GetStorageObject("testdb")
+	assert.Nil(t, err)
+	assert.NotNil(t, storageObject)
+	defer storageObject.Close()
+
+	entries := map[string][]byte{
+		"gone1": []byte("v1"),
+		"gone2": []byte("v2"),
+		"kept":  []byte("v3"),
+	}
+	assert.Nil(t, storageObject.BatchInsert(&entries))
+
+	// "missing" was never written: removing a key that isn't there must not
+	// fail the batch, so callers don't have to check first.
+	assert.Nil(t, storageObject.RemoveEntries([]string{"gone1", "gone2", "missing"}))
+	time.Sleep(100 * time.Millisecond) // Allow deletion to fully propagate
+
+	for _, key := range []string{"gone1", "gone2"} {
+		byteEntry, err := storageObject.GetEntry(key)
+		assert.NotNil(t, err)
+		assert.Nil(t, byteEntry)
+	}
+	byteEntry, err := storageObject.GetEntry("kept")
+	assert.Nil(t, err)
+	assert.Equal(t, "v3", string(byteEntry))
+}
+
+func TestDbObjectRemoveEntriesEmptyIsNoOp(t *testing.T) {
+	defer setup()()
+	assert.Nil(t, CreateDatabase("testdb", true))
+	storageObject, err := GetStorageObject("testdb")
+	assert.Nil(t, err)
+	assert.NotNil(t, storageObject)
+	defer storageObject.Close()
+
+	assert.Nil(t, storageObject.RemoveEntries(nil))
+	assert.Nil(t, storageObject.RemoveEntries([]string{}))
+}
+
 func TestOpenKeyDbWithDirAndNoFiles(t *testing.T) {
 	defer setup()()
 	keyPath := path.Join(keyStorage.path, keyStorage.file)

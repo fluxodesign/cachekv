@@ -4,6 +4,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,7 +34,8 @@ const (
 func main() {
 	runAsCachestore := flag.Bool("run-as-cachestore", true, "if true, run as in-memory cache store")
 	listenAddr := flag.String("listen", ":50051", "address to listen on")
-	cacheStoreAddr := flag.String("cachestore-listen", ":6379", "address for the in-memory cache store's plain-text protocol listener")
+	cacheStoreAddr := flag.String("cachestore-listen", "127.0.0.1:6379", "address for the in-memory cache store's plain-text protocol listener; loopback-only by default since it has no TLS — widen deliberately with --requirepass set")
+	requirePass := flag.String("requirepass", "", "if set, clients on the cache store's raw listener must AUTH with this password before running any other command")
 	persistDb := flag.String("persist-db", "cachestore", "cachekv database name used to persist the in-memory cache store to disk")
 	saveInterval := flag.Duration("save-interval", 60*time.Second, "how often to check whether the in-memory cache store should be saved to disk")
 	saveMinChanges := flag.Int("save-min-changes", 1, "minimum number of writes since the last save before a save-interval tick actually persists to disk")
@@ -88,7 +91,7 @@ func main() {
 				// Each connection gets its own goroutine so slow or idle
 				// clients never block others; all of them funnel commands
 				// into the single cmdChannel processed by stateProcessor.
-				go handleConnection(conn, cmdChannel)
+				go handleConnection(conn, cmdChannel, *requirePass)
 			}
 		}()
 	}
@@ -152,7 +155,13 @@ func main() {
 // handleConnection deals with network I/O and RESP parsing. Commands are read
 // one at a time and funnelled into cmdChan, so replies leave in the same order
 // the client sent its requests.
-func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand) {
+//
+// requirePass, when non-empty, gates every command but AUTH itself behind a
+// per-connection authenticated flag: AUTH is handled entirely here (it never
+// touches cmdChan/Datastore, since auth is connection-local state that the
+// single shared stateProcessor goroutine has no business tracking), and every
+// other command is rejected with NOAUTH until it succeeds.
+func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand, requirePass string) {
 	defer func(conn net.Conn) {
 		err := conn.Close()
 		if err != nil {
@@ -165,6 +174,8 @@ func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand) {
 	// One channel for the whole connection: this loop never has more than a
 	// single command in flight. Buffered by 1 so the processor doesn't block.
 	respChan := make(chan string, 1)
+
+	authenticated := requirePass == ""
 
 	for {
 		args, err := reader.ReadCommand()
@@ -184,15 +195,20 @@ func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand) {
 			return
 		}
 
-		cmd := CkvCommand{
-			Op:   strings.ToUpper(args[0]),
-			Args: args[1:],
-			Resp: respChan,
-		}
+		op := strings.ToUpper(args[0])
 
-		// Send command to the single thread, then wait for its response.
-		cmdChan <- cmd
-		response := <-respChan
+		var response string
+		switch {
+		case op == "AUTH":
+			response = handleAuth(requirePass, args[1:], &authenticated)
+		case !authenticated:
+			response = errNoAuth
+		default:
+			cmd := CkvCommand{Op: op, Args: args[1:], Resp: respChan}
+			// Send command to the single thread, then wait for its response.
+			cmdChan <- cmd
+			response = <-respChan
+		}
 
 		if _, err := writer.WriteString(response); err != nil {
 			log.Printf("Error writing response to connection: %v\n", err)
@@ -208,4 +224,32 @@ func handleConnection(conn net.Conn, cmdChan chan<- CkvCommand) {
 			}
 		}
 	}
+}
+
+// handleAuth implements the AUTH command, run before commandRegistry and
+// without ever touching cmdChan — see handleConnection's doc comment for why.
+func handleAuth(requirePass string, args []string, authenticated *bool) string {
+	if requirePass == "" {
+		return "-ERR Client sent AUTH, but no password is set.\r\n"
+	}
+	if len(args) != 1 {
+		return wrongArgs("auth")
+	}
+	if passwordsEqual(args[0], requirePass) {
+		*authenticated = true
+		return okReply
+	}
+	// A previously-authenticated connection that sends a wrong password is
+	// re-gated: AUTH always re-validates, it doesn't just check once.
+	*authenticated = false
+	return "-ERR invalid password\r\n"
+}
+
+// passwordsEqual reports whether a and b match, comparing in constant time
+// over a fixed-size hash of each so that neither a length mismatch nor a
+// matching prefix leaks timing information.
+func passwordsEqual(a, b string) bool {
+	sumA := sha256.Sum256([]byte(a))
+	sumB := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(sumA[:], sumB[:]) == 1
 }

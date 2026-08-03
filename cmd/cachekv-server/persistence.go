@@ -70,11 +70,11 @@ func snapshot(store *Datastore) map[string][]byte {
 }
 
 // saveToDisk persists store's current contents to the named cachekv database
-// in a single batch, mirroring one Redis-style RDB snapshot. When a key
-// changed type since the last save, the prefixed name it no longer occupies
-// is removed first — BatchInsert only upserts, so an orphaned prefixed key
-// would otherwise linger on disk forever and re-trigger a collision on every
-// restart.
+// in a single batch, mirroring one Redis-style RDB snapshot. When a key was
+// deleted or changed type since the last save, the prefixed name it no longer
+// occupies is removed first — BatchInsert only upserts, so an orphaned
+// prefixed key would otherwise linger on disk forever and come back as a
+// resurrected value (or a collision) on the next restart.
 func saveToDisk(dbName string, store *Datastore) error {
 	entries := snapshot(store)
 	if len(store.stale) == 0 {
@@ -88,15 +88,23 @@ func saveToDisk(dbName string, store *Datastore) error {
 	defer storage.Close()
 
 	// Deletes first: a key can be orphaned and then re-created under the same
-	// prefixed name, and the insert must win. Removed one at a time (rather
-	// than clearing stale at the end) so a failed save doesn't lose track of
-	// deletes that already succeeded.
+	// prefixed name, and the insert must win. One batch rather than a
+	// RemoveEntry per key, because DEL/HDEL/SREM can orphan an unbounded
+	// number of names between two save ticks.
+	//
+	// stale is cleared only on success, mirroring how stateProcessor only
+	// resets dirty on a successful save. RemoveEntries is not atomic, so an
+	// error may leave some of these already gone from disk; deletes are
+	// idempotent, so re-sending the whole set on the next save is harmless.
+	orphaned := make([]string, 0, len(store.stale))
 	for k := range store.stale {
-		if err := storage.RemoveEntry(k); err != nil {
-			return err
-		}
-		delete(store.stale, k)
+		orphaned = append(orphaned, k)
 	}
+	if err := storage.RemoveEntries(orphaned); err != nil {
+		return err
+	}
+	clear(store.stale)
+
 	return storage.BatchInsert(&entries)
 }
 

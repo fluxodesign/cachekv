@@ -705,6 +705,28 @@ func batchInsertGeneric(ctx context.Context, values *map[string][]byte, db *badg
 	return wb.Flush()
 }
 
+// batchDeleteGeneric removes every key in keys from db in a single write
+// batch, the delete-side counterpart to batchInsertGeneric. Removing a key
+// that isn't there is not an error, so callers don't have to check first.
+func batchDeleteGeneric(ctx context.Context, keys []string, db *badger.DB) error {
+	wb := db.NewWriteBatch()
+	defer wb.Cancel()
+	for _, key := range keys {
+		if err := wb.Delete([]byte(key)); err != nil {
+			log.Println("error adding key to delete batch: ", err)
+			return err
+		}
+
+		// Check for context cancellation during batch build
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+	return wb.Flush()
+}
+
 func countRecords(prefix string, db *badger.DB, verbose bool) (int, error) {
 	var err error
 	count := 0
@@ -1083,6 +1105,25 @@ func (t *Storage) RemoveEntry(key string) error {
 	_ = writeMetaEvent(EventTypeDelete, "Deleted entry: "+t.file+":"+key)
 	return err
 
+}
+
+// RemoveEntries deletes all of keys from this database in a single batch and
+// records one delete event, rather than the transaction and event per key a
+// RemoveEntry loop would cost. Removing a key that isn't there is not an
+// error.
+//
+// A failed flush may have already applied some of the deletes, so the batch is
+// not atomic. Deletes are idempotent, so a caller that retries the whole slice
+// after an error still ends up in the right place.
+func (t *Storage) RemoveEntries(keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if err := batchDeleteGeneric(context.Background(), keys, t.db); err != nil {
+		return err
+	}
+	_ = writeMetaEvent(EventTypeDelete, "Deleted batch data from db: "+t.file)
+	return nil
 }
 
 // BatchInsert writes all entries to the named database in a single batch. It

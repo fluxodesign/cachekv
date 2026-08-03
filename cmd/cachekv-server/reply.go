@@ -8,6 +8,7 @@ const (
 	nilBulk      = "$-1\r\n" // Redis standard for (nil)
 	noneReply    = "+none\r\n"
 	errWrongType = "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+	errNoAuth    = "-NOAUTH Authentication required.\r\n"
 )
 
 func bulkString(s string) string {

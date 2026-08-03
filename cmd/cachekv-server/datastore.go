@@ -73,6 +73,9 @@ var writeOps = map[string]bool{
 	"SET":  true,
 	"HSET": true,
 	"SADD": true,
+	"DEL":  true,
+	"HDEL": true,
+	"SREM": true,
 }
 
 // stateProcessor is the single goroutine allowed to touch store; commands
@@ -177,6 +180,21 @@ func (d *Datastore) replace(key string, v *value) {
 	delete(d.stale, v.kind.prefix()+key)
 }
 
+// remove deletes key from the keyspace whatever type it holds, recording its
+// persisted name as stale so the next save drops it from disk too. Reports
+// whether the key was there to begin with. Marking a key that was never
+// persisted is harmless: the removal is a no-op delete on a name that isn't
+// on disk.
+func (d *Datastore) remove(key string) bool {
+	v, found := d.keys[key]
+	if !found {
+		return false
+	}
+	delete(d.keys, key)
+	d.stale[v.kind.prefix()+key] = struct{}{}
+	return true
+}
+
 type CommandHandler func(store *Datastore, args []string) string
 
 // command registry
@@ -188,6 +206,9 @@ var commandRegistry = map[string]CommandHandler{
 	"HGET": hgetCommand,
 	"SADD": saddCommand,
 	"TYPE": typeCommand,
+	"DEL":  delCommand,
+	"HDEL": hdelCommand,
+	"SREM": sremCommand,
 }
 
 func pingCommand(store *Datastore, args []string) string {
@@ -254,6 +275,37 @@ func hgetCommand(store *Datastore, args []string) string {
 	return bulkString(val)
 }
 
+// hdelCommand implements HDEL key field [field ...], replying with the number
+// of fields that were actually present. As in Redis, a hash left with no
+// fields stops existing: the key is removed from the keyspace so TYPE reports
+// none and the persisted h: entry is dropped on the next save.
+func hdelCommand(store *Datastore, args []string) string {
+	if len(args) < 2 {
+		return wrongArgs("hdel")
+	}
+	key, fields := args[0], args[1:]
+
+	v, found, errReply := store.lookup(key, typeHash)
+	if errReply != "" {
+		return errReply
+	}
+	if !found {
+		return integer(0)
+	}
+
+	removed := 0
+	for _, field := range fields {
+		if _, exists := v.hash[field]; exists {
+			delete(v.hash, field)
+			removed++
+		}
+	}
+	if len(v.hash) == 0 {
+		store.remove(key)
+	}
+	return integer(removed)
+}
+
 func typeCommand(store *Datastore, args []string) string {
 	if len(args) < 1 {
 		return wrongArgs("type")
@@ -263,6 +315,22 @@ func typeCommand(store *Datastore, args []string) string {
 		return noneReply
 	}
 	return "+" + v.kind.String() + "\r\n"
+}
+
+// delCommand implements DEL key [key ...], replying with the number of keys
+// that existed. Like Redis's DEL it is type-agnostic — no WRONGTYPE, whatever
+// the key holds goes.
+func delCommand(store *Datastore, args []string) string {
+	if len(args) < 1 {
+		return wrongArgs("del")
+	}
+	removed := 0
+	for _, key := range args {
+		if store.remove(key) {
+			removed++
+		}
+	}
+	return integer(removed)
 }
 
 func saddCommand(store *Datastore, args []string) string {
@@ -284,4 +352,35 @@ func saddCommand(store *Datastore, args []string) string {
 		}
 	}
 	return integer(added) // Integer reply of members added
+}
+
+// sremCommand implements SREM key member [member ...], replying with the
+// number of members that were actually present. As in Redis, an empty set
+// stops existing: the key is removed from the keyspace so TYPE reports none
+// and the persisted z: entry is dropped on the next save.
+func sremCommand(store *Datastore, args []string) string {
+	if len(args) < 2 {
+		return wrongArgs("srem")
+	}
+	key, members := args[0], args[1:]
+
+	v, found, errReply := store.lookup(key, typeSet)
+	if errReply != "" {
+		return errReply
+	}
+	if !found {
+		return integer(0)
+	}
+
+	removed := 0
+	for _, member := range members {
+		if _, exists := v.set[member]; exists {
+			delete(v.set, member)
+			removed++
+		}
+	}
+	if len(v.set) == 0 {
+		store.remove(key)
+	}
+	return integer(removed)
 }
